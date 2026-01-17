@@ -1,9 +1,17 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { P2PManager } from '../lib/p2p';
+import { useEffect, useState, useRef } from 'react';
+import { io, Socket } from 'socket.io-client';
 import { generateKeyPair, exportPublicKey, importPublicKey, deriveSharedKey } from '../lib/crypto';
 import { sendFilePipeline, ReceiverPipeline } from '../lib/pipeline';
-import { FilePicker } from './FilePicker';
-import { ShieldCheck, Cpu, Terminal } from 'lucide-react';
+import { FilePicker } from './FilePicker'; // ✅ Ensure this component handles the AI UI
+import { ShieldCheck, Cpu, Terminal, AlertCircle, Users, Wifi, Download } from 'lucide-react';
+
+// ⚠️ CHANGE THIS TO YOUR HOST IP (e.g., http://192.168.1.5:3001) for cross-device
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+
+const socket: Socket = io(SERVER_URL, {
+  transports: ['websocket'],
+  reconnectionAttempts: 5,
+});
 
 export const TransferRoom = () => {
   const [username, setUsername] = useState('');
@@ -12,198 +20,685 @@ export const TransferRoom = () => {
   const [status, setStatus] = useState('Disconnected');
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
+  const [error, setError] = useState('');
+  const [onlineUsers, setOnlineUsers] = useState<string[]>([]);
   
-  const p2pRef = useRef<P2PManager | null>(null);
+  // ✅ NEW: Received Files List
+  const [receivedFiles, setReceivedFiles] = useState<{name: string, url: string}[]>([]);
+  
   const keyPairRef = useRef<CryptoKeyPair | null>(null);
   const sharedKeyRef = useRef<CryptoKey | null>(null);
   const receiverPipelineRef = useRef<ReceiverPipeline | null>(null);
 
-  const addLog = (msg: string) => setLogs(prev => [...prev.slice(-5), msg]);
+  const addLog = (msg: string) => {
+    // Keep log clean, max 20 lines
+    setLogs(prev => [...prev.slice(-19), msg]);
+  };
 
-  // 1. Generate Keys on Mount
+  // --- 1. SETUP & LISTENERS ---
   useEffect(() => {
+    // Generate Keys
     generateKeyPair().then(keys => {
       keyPairRef.current = keys;
-      addLog("🔐 Crypto Keys Ready");
+      addLog("🔐 Crypto Keys Generated");
     });
-    return () => p2pRef.current?.destroy(); // Cleanup on unmount
-  }, []);
 
-  const handleJoin = () => {
-    if (!username) return;
-    setJoined(true);
-    addLog(`⏳ Initializing Node as ${username}...`);
-
-    // Initialize PeerJS
-    p2pRef.current = new P2PManager(
-      username, 
-      // 1. On Connect Callback (The connection worked!)
-      async () => {
-        setStatus('🟢 P2P Connected');
-        addLog("🤝 Peer Connection Opened!");
-        
-        // NOW we do the handshake
-        if (keyPairRef.current) {
-          addLog("🔑 Sending Crypto Keys...");
-          const pubKey = await exportPublicKey(keyPairRef.current.publicKey);
-          p2pRef.current?.send({ type: 'key-swap', key: pubKey });
-        } else {
-          addLog("❌ Error: Crypto Keys not ready yet!");
-        }
-      },
-      // 2. On Data Callback
-      async (data: any) => {
-         await handleIncomingData(data);
-      }
-    );
-
-    // ⚠️ NEW: Listen for "ID Taken" errors explicitly
-    p2pRef.current.peer.on('error', (err) => {
-      if (err.type === 'unavailable-id') {
-        alert(`The name '${username}' is taken! Please refresh and try a unique name (e.g. ${username}_${Math.floor(Math.random()*1000)})`);
-        setJoined(false); // Go back to login
-      } else {
-        addLog(`❌ P2P Error: ${err.type}`);
-      }
+    socket.on('connect', () => {
+      setStatus('🟡 Server Connected');
     });
-  };
-  
-  const handleConnect = () => {
-    if (!targetUser) return;
-    addLog(`📞 Calling ${targetUser}...`);
-    p2pRef.current?.connectTo(targetUser);
-  };
 
-  const handleIncomingData = async (data: any) => {
-    // 1. Protocol Messages (JSON)
-    if (data.type) {
-      if (data.type === 'key-swap') {
-        addLog("🔑 Received Public Key");
-        const foreignKey = await importPublicKey(data.key);
+    socket.on('disconnect', () => setStatus('🔴 Disconnected'));
+
+    // Handle User List
+    socket.on('user-online', (data: any) => {
+      // In a real app, you'd manage the full list array here
+    });
+
+    // 📨 INCOMING DATA HANDLER
+    socket.on('file-relay', async (data: any) => {
+      const { from, payload } = data;
+
+      // A. Handshake
+      if (payload.type === 'key-swap') {
+        addLog(`🔑 Received Key from ${from}`);
+        const foreignKey = await importPublicKey(payload.key);
         if (keyPairRef.current) {
           sharedKeyRef.current = await deriveSharedKey(keyPairRef.current.privateKey, foreignKey);
-          addLog("🔒 Secure Tunnel Established (AES-GCM)");
+          addLog("🔒 Encryption Established");
+          setStatus('🟢 Secure Tunnel Ready');
         }
-      }
-      if (data.type === 'file-start') {
-        addLog(`📥 Receiving File: ${data.name}`);
+      } 
+      
+      // B. File Start
+      else if (payload.type === 'file-start') {
+        console.log("📂 START:", payload.name);
+        addLog(`📥 Receiving: ${payload.name}`);
+        setProgress(0);
+        
         if (sharedKeyRef.current) {
           receiverPipelineRef.current = new ReceiverPipeline(sharedKeyRef.current, (blob) => {
+            // ✅ THIS RUNS WHEN 'finish()' IS CALLED
+            console.log("✅ CALLBACK FIRED: File Reconstructed");
+            addLog("✅ File Reconstructed!");
+            
             const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = data.name;
-            a.click();
-            addLog("✅ Download Complete!");
+            setReceivedFiles(prev => [...prev, { name: payload.name, url }]);
             setProgress(100);
           });
         }
+      } 
+      
+      // C. File Chunk
+      else if (payload.type === 'file-chunk') {
+        if (receiverPipelineRef.current) {
+          try {
+            await receiverPipelineRef.current.processChunk(new Uint8Array(payload.chunk));
+            setProgress(p => (p >= 95 ? 95 : p + 1));
+          } catch (e) { console.error(e); }
+        }
       }
-      return;
-    }
 
-    // 2. Binary Data (Encrypted Chunks)
-    // PeerJS sends binary as ArrayBuffer
-    if (data instanceof ArrayBuffer || data instanceof Uint8Array) {
-      if (receiverPipelineRef.current) {
-        await receiverPipelineRef.current.processChunk(new Uint8Array(data));
-        setProgress(p => (p >= 90 ? 90 : p + 2));
+      // D. File End (The Trigger)
+      else if (payload.type === 'file-end') {
+        console.log("🏁 End Signal Received");
+        if (receiverPipelineRef.current) {
+          receiverPipelineRef.current.finish(); // Calls the callback above
+        }
       }
+    });
+
+    return () => {
+      socket.off('connect');
+      socket.off('file-relay');
+    };
+  }, []);
+
+  // Poll for users
+  useEffect(() => {
+    if (joined) {
+      const interval = setInterval(async () => {
+        try {
+          const res = await fetch(`${SERVER_URL}/api/users`);
+          const data = await res.json();
+          setOnlineUsers(data.users.map((u: any) => u.username));
+        } catch (e) {}
+      }, 2000);
+      return () => clearInterval(interval);
     }
+  }, [joined]);
+
+
+  // --- 2. ACTION HANDLERS ---
+
+  const handleJoin = () => {
+    if (!username) return;
+    socket.emit('register-user', username, socket.id);
+    setJoined(true);
+    setStatus('🟢 Online');
   };
 
-  const startTransfer = async (file: File, algo: string) => {
-    if (!sharedKeyRef.current) return alert("Wait for Secure Handshake!");
-    
-    addLog(`🚀 Sending (${algo})...`);
-    p2pRef.current?.send({ type: 'file-start', name: file.name });
+  const handleConnect = async () => {
+    if (!targetUser || !keyPairRef.current) return;
+    addLog(`📞 Handshaking with ${targetUser}...`);
+    const pubKey = await exportPublicKey(keyPairRef.current.publicKey);
+    socket.emit('file-relay', {
+      targetUsername: targetUser,
+      payload: { type: 'key-swap', key: pubKey }
+    });
+  };
 
-    await sendFilePipeline(file, sharedKeyRef.current, (chunk) => {
-      // PeerJS can send Uint8Array directly
-      p2pRef.current?.send(chunk);
-      setProgress(p => (p >= 100 ? 100 : p + 1));
+  // ✅ RESTORED: AI & Compression Logic
+  // This function is passed to <FilePicker />
+  const startTransfer = async (file: File, algo: string) => {
+    if (!sharedKeyRef.current) return setError("⚠️ Connect to a user first!");
+    
+    addLog(`🤖 AI Optimized: Sending "${file.name}" using ${algo}...`);
+    setProgress(0);
+
+    // 1. Notify Start
+    socket.emit('file-relay', {
+      targetUsername: targetUser,
+      payload: { type: 'file-start', name: file.name }
+    });
+
+    // 2. Send Chunks with Delay
+    await sendFilePipeline(file, sharedKeyRef.current, async (chunk) => {
+      socket.emit('file-relay', {
+        targetUsername: targetUser,
+        payload: { type: 'file-chunk', chunk }
+      });
+      // ⚠️ IMPORTANT: Small delay to prevent crashing the socket
+      await new Promise(r => setTimeout(r, 5));
+      setProgress(p => (p >= 95 ? 95 : p + 0.5));
+    });
+
+    // 3. Notify End
+    socket.emit('file-relay', {
+      targetUsername: targetUser,
+      payload: { type: 'file-end' }
     });
     
+    addLog("✅ Upload Complete.");
     setProgress(100);
-    addLog("✅ File Sent.");
   };
 
-  // --- RENDER (Same as before) ---
+  // --- 3. RENDER ---
+
   return (
-    <div className="max-w-5xl mx-auto p-4 text-white font-sans">
-      <div className="flex justify-between items-center mb-8 border-b border-gray-700 pb-4">
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <Cpu className="text-blue-500" /> SmartStream (PeerJS)
-        </h1>
-        <div className={`px-3 py-1 rounded-full text-xs font-bold ${status.includes('Connected') ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
-          {status}
+    <div className="min-h-screen bg-gray-900 text-white font-sans p-4">
+      <div className="max-w-6xl mx-auto">
+        
+        {/* Header */}
+        <div className="flex justify-between items-center mb-8 border-b border-gray-700 pb-4">
+          <h1 className="text-2xl font-bold flex items-center gap-2">
+            <Cpu className="text-blue-500" /> SmartStream <span className="text-xs bg-blue-900 px-2 rounded">RELAY</span>
+          </h1>
+          <div className="flex items-center gap-4">
+            {joined && <button onClick={() => window.location.reload()} className="bg-gray-700 px-3 py-1 rounded text-xs">Logout</button>}
+            <div className="text-xs font-bold text-green-400 flex items-center gap-1">
+              <Wifi className="w-3 h-3" /> {status}
+            </div>
+          </div>
         </div>
+
+        {/* Login */}
+        {!joined ? (
+          <div className="max-w-md mx-auto bg-gray-800 p-8 rounded-xl shadow-lg">
+            <h2 className="text-xl font-bold mb-4">Join Network</h2>
+            <input 
+              className="w-full bg-gray-900 border border-gray-600 rounded p-3 mb-4 outline-none focus:border-blue-500"
+              placeholder="Enter Username"
+              value={username}
+              onChange={e => setUsername(e.target.value)}
+            />
+            <button onClick={handleJoin} className="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded font-bold">Start Node</button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            
+            {/* LEFT: Controls */}
+            <div className="space-y-6">
+              {/* Users */}
+              <div className="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                <h3 className="text-sm font-bold text-gray-400 uppercase mb-4 flex gap-2"><Users className="w-4" /> Online Users</h3>
+                <div className="space-y-2 max-h-40 overflow-y-auto">
+                  {onlineUsers.filter(u => u !== username).map(u => (
+                    <div key={u} className="flex justify-between items-center bg-gray-900 p-3 rounded hover:bg-gray-700 transition">
+                      <span className="text-green-400">● {u}</span>
+                      <button onClick={() => { setTargetUser(u); handleConnect(); }} className="bg-blue-600 px-3 py-1 rounded text-xs font-bold">Connect</button>
+                    </div>
+                  ))}
+                  {onlineUsers.filter(u => u !== username).length === 0 && <p className="text-gray-500 text-xs">Scanning for peers...</p>}
+                </div>
+              </div>
+
+              {/* Manual Connect */}
+              <div className="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                <div className="flex gap-2">
+                  <input className="flex-1 bg-gray-900 border border-gray-600 rounded p-2 text-sm outline-none" placeholder="Or type username..." value={targetUser} onChange={e => setTargetUser(e.target.value)} />
+                  <button onClick={handleConnect} className="bg-gray-700 px-4 rounded text-sm font-bold">Handshake</button>
+                </div>
+              </div>
+
+              {/* AI File Picker */}
+              <div className="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                <h3 className="text-sm font-bold text-gray-400 uppercase mb-4">AI Smart Transfer</h3>
+                {/* ✅ Connected AI Logic */}
+                <FilePicker onFileSelected={startTransfer} disabled={!sharedKeyRef.current} />
+              </div>
+            </div>
+
+            {/* RIGHT: Logs & Files */}
+            <div className="space-y-6">
+              
+              {/* ✅ RECEIVED FILES LIST (The missing piece) */}
+              {receivedFiles.length > 0 && (
+                <div className="bg-green-900/20 p-6 rounded-xl border border-green-500/30">
+                  <h3 className="text-sm font-bold text-green-400 uppercase mb-4 flex gap-2"><Download className="w-4" /> Received Files</h3>
+                  <div className="space-y-2">
+                    {receivedFiles.map((f, i) => (
+                      <div key={i} className="flex justify-between items-center bg-gray-900 p-3 rounded border border-gray-700">
+                        <span className="truncate max-w-[200px] text-sm font-mono">{f.name}</span>
+                        <a href={f.url} download={f.name} className="bg-green-600 hover:bg-green-500 text-white text-xs font-bold px-3 py-1 rounded">Download</a>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Encryption Status */}
+              <div className="bg-gray-800 p-6 rounded-xl border border-gray-700 flex justify-between items-center">
+                <div>
+                  <h3 className="font-bold">Encryption Layer</h3>
+                  <p className={`text-xs mt-1 ${sharedKeyRef.current ? 'text-green-400' : 'text-yellow-500'}`}>
+                    {sharedKeyRef.current ? '🔒 AES-GCM-256 (Active)' : '⏳ Waiting for Handshake...'}
+                  </p>
+                </div>
+                <ShieldCheck className={`w-8 h-8 ${sharedKeyRef.current ? 'text-green-500' : 'text-gray-600'}`} />
+              </div>
+
+              {/* Logs */}
+              <div className="bg-black p-4 rounded-xl border border-gray-800 h-80 overflow-hidden flex flex-col font-mono text-xs">
+                <div className="flex items-center gap-2 text-gray-500 mb-2 border-b border-gray-800 pb-2"><Terminal className="w-4" /> System Log</div>
+                <div className="flex-1 overflow-y-auto space-y-1">
+                  {logs.map((log, i) => (
+                    <div key={i} className="text-green-400 break-words border-l-2 border-green-900 pl-2">
+                      <span className="text-gray-600">[{new Date().toLocaleTimeString()}]</span> {log}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Progress */}
+              {progress > 0 && (
+                <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
+                  <div className="bg-blue-500 h-2 transition-all duration-300" style={{ width: `${progress}%` }}></div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
-
-      {!joined ? (
-        <div className="max-w-md mx-auto bg-gray-800 p-8 rounded-2xl border border-gray-700">
-          <h2 className="text-xl font-bold mb-4">Identity Setup</h2>
-          <input 
-            className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 mb-4 text-white"
-            placeholder="Username (e.g. Alice)"
-            value={username}
-            onChange={e => setUsername(e.target.value)}
-          />
-          <button onClick={handleJoin} className="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-lg font-bold">
-            Start Node
-          </button>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-           {/* LEFT: Controls */}
-           <div className="space-y-6">
-            <div className="bg-gray-800 p-6 rounded-2xl border border-gray-700">
-              <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4">Connect</h3>
-              <div className="flex gap-2">
-                <input 
-                  className="flex-1 bg-gray-900 border border-gray-600 rounded-lg p-2 text-sm text-white"
-                  placeholder="Target Username"
-                  value={targetUser}
-                  onChange={e => setTargetUser(e.target.value)}
-                />
-                <button onClick={handleConnect} className="bg-green-600 px-4 rounded-lg text-sm font-bold hover:bg-green-500">
-                  Connect
-                </button>
-              </div>
-            </div>
-
-            <div className="bg-gray-800 p-6 rounded-2xl border border-gray-700">
-              <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4">File Pipeline</h3>
-              <FilePicker onFileSelected={startTransfer} />
-            </div>
-          </div>
-
-          {/* RIGHT: Logs & Status */}
-          <div className="space-y-6">
-            <div className="bg-gray-800 p-6 rounded-2xl border border-gray-700 flex items-center justify-between">
-              <div>
-                <h3 className="font-bold text-gray-200">Encryption</h3>
-                <p className="text-xs text-gray-400 mt-1">{sharedKeyRef.current ? 'AES-GCM ACTIVE' : 'Waiting...'}</p>
-              </div>
-              <ShieldCheck className={`w-10 h-10 ${sharedKeyRef.current ? 'text-green-500' : 'text-gray-600'}`} />
-            </div>
-
-            <div className="bg-black p-4 rounded-xl border border-gray-800 h-64 overflow-y-auto font-mono text-xs space-y-2">
-              <div className="flex items-center gap-2 text-gray-500 mb-2 border-b border-gray-800 pb-2">
-                <Terminal className="w-4 h-4" /> System Log
-              </div>
-              {logs.map((log, i) => (
-                <div key={i} className="text-green-400"> {log} </div>
-              ))}
-            </div>
-             {progress > 0 && (
-              <div className="w-full bg-gray-700 rounded-full h-2">
-                <div className="bg-blue-500 h-2 rounded-full" style={{ width: `${progress}%` }}></div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 };
+
+
+
+
+
+
+
+
+
+
+
+// import { useEffect, useState, useRef } from 'react';
+// import { io, Socket } from 'socket.io-client';
+// import { generateKeyPair, exportPublicKey, importPublicKey, deriveSharedKey } from '../lib/crypto';
+// import { sendFilePipeline, ReceiverPipeline } from '../lib/pipeline';
+// import { FilePicker } from './FilePicker';
+// import { ShieldCheck, Cpu, Terminal, AlertCircle, Users, Wifi } from 'lucide-react';
+
+// // 🔌 Initialize Socket Connection (Singleton)
+// // ⚠️ IMPORTANT: If testing on 2 devices, change 'localhost' to your LAN IP (e.g. 'http://192.168.1.5:3001')
+// const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+
+// const socket: Socket = io(SERVER_URL, {
+//   transports: ['websocket', 'polling'], // Force stable transport
+//   reconnectionAttempts: 5,
+// });
+
+// export const TransferRoom = () => {
+//   const [username, setUsername] = useState('');
+//   const [targetUser, setTargetUser] = useState('');
+//   const [joined, setJoined] = useState(false);
+//   const [status, setStatus] = useState('Disconnected');
+//   const [progress, setProgress] = useState(0);
+//   const [logs, setLogs] = useState<string[]>([]);
+//   const [error, setError] = useState('');
+//   const [onlineUsers, setOnlineUsers] = useState<string[]>([]);
+//   // Add this new state
+//   const [receivedFiles, setReceivedFiles] = useState<{name: string, url: string}[]>([]);
+  
+//   // Refs for heavy objects
+//   const keyPairRef = useRef<CryptoKeyPair | null>(null);
+//   const sharedKeyRef = useRef<CryptoKey | null>(null);
+//   const receiverPipelineRef = useRef<ReceiverPipeline | null>(null);
+
+//   const addLog = (msg: string) => {
+//     console.log(msg);
+//     setLogs(prev => [...prev.slice(-9), msg]);
+//   };
+
+//   // 📨 SETUP & LISTENERS (Corrected Version)
+//   useEffect(() => {
+//     // 🛑 1. GENERATE KEYS IMMEDIATELY (Restored this!)
+//     generateKeyPair().then(keys => {
+//       keyPairRef.current = keys;
+//       addLog("🔐 Crypto Keys Generated");
+//     });
+
+//     // 2. Connection Status
+//     socket.on('connect', () => {
+//       setStatus('🟡 Server Connected');
+//       addLog("✅ Connected to Relay Server");
+//     });
+
+//     socket.on('disconnect', () => {
+//       setStatus('🔴 Server Disconnected');
+//       addLog("❌ Disconnected");
+//     });
+
+//     // 3. THE CORE DATA HANDLER (With Debug Logs)
+//     socket.on('file-relay', async (data: any) => {
+//       const { from, payload } = data;
+
+//       // Debug: Log protocol messages (ignore chunks to keep console clean)
+//       if (payload.type !== 'file-chunk') {
+//         console.log(`[Protocol] Received ${payload.type} from ${from}`);
+//       }
+
+//       // A. Handshake (Key Swap)
+//       if (payload.type === 'key-swap') {
+//         addLog(`🔑 Received Key from ${from}`);
+//         const foreignKey = await importPublicKey(payload.key);
+//         if (keyPairRef.current) {
+//           sharedKeyRef.current = await deriveSharedKey(keyPairRef.current.privateKey, foreignKey);
+//           addLog("🔒 Encryption Established");
+//           setStatus('🟢 Ready to Receive');
+//         }
+//       } 
+      
+//       // B. File Start (Initialize Pipeline)
+//       else if (payload.type === 'file-start') {
+//         console.log("📂 STARTING DOWNLOAD:", payload.name);
+//         addLog(`📥 Starting Download: ${payload.name}`);
+//         setProgress(0);
+        
+//         if (sharedKeyRef.current) {
+//           // Initialize the receiver engine
+//           receiverPipelineRef.current = new ReceiverPipeline(sharedKeyRef.current, (blob) => {
+//             console.log("✅ FILE RECONSTRUCTED SUCCESSFULLY");
+//             addLog("✅ File Reconstructed!");
+            
+//             const url = URL.createObjectURL(blob);
+//             setReceivedFiles(prev => [...prev, { name: payload.name, url: url }]);
+//             setProgress(100);
+//           });
+//         } else {
+//           console.error("❌ Error: Received file but no Encryption Key!");
+//           addLog("❌ Error: Missing Encryption Key");
+//         }
+//       } 
+      
+//       // C. File Chunk (The Data Stream)
+//       else if (payload.type === 'file-chunk') {
+//         if (!receiverPipelineRef.current) {
+//           // Warn only once per transfer to avoid spam
+//           if (progress === 0) console.warn("⚠️ Packet dropped: Pipeline not ready");
+//           return;
+//         }
+
+//         try {
+//           const chunkData = new Uint8Array(payload.chunk);
+//           await receiverPipelineRef.current.processChunk(chunkData);
+          
+//           // Visual Progress
+//           setProgress(p => (p >= 95 ? 95 : p + 0.5));
+          
+//         } catch (err) {
+//           console.error("❌ Error processing chunk:", err);
+//         }
+//       }
+
+//       // D. File End (Force Save)
+//       else if (payload.type === 'file-end') {
+//         console.log("🏁 Received End-of-File Signal");
+//         addLog("🏁 Finalizing Download...");
+        
+//         if (receiverPipelineRef.current) {
+//           // Force the pipeline to finish and save whatever it has
+//           // Note: You might need to add a method to your ReceiverPipeline class 
+//           // called 'finish()' if it doesn't auto-detect end.
+//           receiverPipelineRef.current.finish();
+//           // For now, let's manually trigger the cleanup if needed, 
+//           // but usually, the pipeline callback fires automatically when stream ends.
+          
+//           setProgress(100);
+//         }
+//       }
+//     });
+
+//     return () => {
+//       socket.off('connect');
+//       socket.off('disconnect');
+//       socket.off('file-relay');
+//     };
+//   }, []);
+
+//   // Poll for users (Simple discovery)
+//   useEffect(() => {
+//     const fetchUsers = async () => {
+//       try {
+//         const response = await fetch(`${SERVER_URL}/api/users`);
+//         const data = await response.json();
+//         setOnlineUsers(data.users.map((u: any) => u.username));
+//       } catch (err) { }
+//     };
+//     if (joined) {
+//       const interval = setInterval(fetchUsers, 2000);
+//       return () => clearInterval(interval);
+//     }
+//   }, [joined]);
+
+
+//   // --- ACTIONS ---
+
+//   const handleJoin = () => {
+//     if (!username.trim()) return setError('Enter a username');
+    
+//     // Register with Server (using socket ID as "Peer ID" placeholder)
+//     addLog(`📝 Registering as ${username}...`);
+//     socket.emit('register-user', username, socket.id); // Reusing socket logic
+//     setJoined(true);
+//     setStatus('🟢 Online');
+//     setError('');
+//   };
+
+//   const handleConnect = async () => {
+//     if (!targetUser.trim()) return setError('Enter target username');
+//     if (!keyPairRef.current) return setError('Crypto keys not ready');
+
+//     addLog(`📞 Handshaking with ${targetUser}...`);
+    
+//     // Export my public key
+//     const pubKey = await exportPublicKey(keyPairRef.current.publicKey);
+//     // Send Key via Server Relay
+//     socket.emit('file-relay', {
+//       targetUsername: targetUser,
+//       payload: { type: 'key-swap', key: pubKey }
+//     });
+    
+//     addLog("🔑 Public Key Sent. Waiting for response...");
+//   };
+
+//  const startTransfer = async (file: File) => {
+//     if (!sharedKeyRef.current) return setError("⚠️ Establish connection first!");
+    
+//     addLog(`🚀 Sending "${file.name}" via Relay...`);
+//     setProgress(0);
+
+//     // 1. Notify Start
+//     socket.emit('file-relay', {
+//       targetUsername: targetUser,
+//       payload: { type: 'file-start', name: file.name }
+//     });
+
+//     // 2. Send Chunks via Pipeline
+//     // 👇 NOTICE: we explicitly define 'chunk' inside the parentheses below
+//     await sendFilePipeline(file, sharedKeyRef.current, async (chunk) => {
+      
+//       // Now 'chunk' exists, so we can use it here
+//       socket.emit('file-relay', {
+//         targetUsername: targetUser,
+//         payload: { type: 'file-chunk', chunk: chunk, size: file.size}
+//       });
+
+//       // Tiny delay to prevent flooding (5ms)
+//       await new Promise(resolve => setTimeout(resolve, 5));
+
+//       setProgress(p => (p >= 99 ? 99 : p + 0.5)); 
+//     });
+
+//     socket.emit('file-relay', {
+//       targetUsername: targetUser,
+//       payload: { type: 'file-end' } // <--- Send this signal
+//     });
+    
+//     setProgress(100);
+//     addLog("✅ Upload Complete.");
+//   };
+//   // --- RENDER ---
+//   return (
+//     <div className="min-h-screen bg-gray-900">
+//       <div className="max-w-5xl mx-auto p-4 text-white font-sans">
+        
+//         {/* Header */}
+//         <div className="flex justify-between items-center mb-8 border-b border-gray-700 pb-4">
+//           <h1 className="text-2xl font-bold flex items-center gap-2">
+//             <Cpu className="text-blue-500" /> SmartStream <span className="text-xs bg-blue-900 text-blue-200 px-2 py-1 rounded">RELAY MODE</span>
+//           </h1>
+//           <div className="flex items-center gap-4">
+//             {joined && (
+//               <button onClick={() => window.location.reload()} className="px-3 py-1 rounded text-xs bg-gray-700 hover:bg-gray-600">
+//                 Logout
+//               </button>
+//             )}
+//             <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold ${status.includes('🟢') ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+//               <Wifi className="w-3 h-3" /> {status}
+//             </div>
+//           </div>
+//         </div>
+
+//         {/* Error Banner */}
+//         {error && (
+//           <div className="mb-4 p-4 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center gap-3 text-red-400">
+//             <AlertCircle className="w-5 h-5" />
+//             {error}
+//           </div>
+//         )}
+
+//         {/* Login Screen */}
+//         {!joined ? (
+//           <div className="max-w-md mx-auto bg-gray-800 p-8 rounded-2xl border border-gray-700 shadow-xl">
+//             <h2 className="text-xl font-bold mb-4">Identity Setup</h2>
+//             <input 
+//               className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 mb-4 text-white focus:border-blue-500 outline-none"
+//               placeholder="Username (e.g. Alice)"
+//               value={username}
+//               onChange={e => setUsername(e.target.value)}
+//               onKeyDown={e => e.key === 'Enter' && handleJoin()}
+//             />
+//             <button onClick={handleJoin} className="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-lg font-bold transition-all">
+//               Join Network
+//             </button>
+//           </div>
+//         ) : (
+//           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            
+//             {/* LEFT COLUMN: Controls */}
+//             <div className="space-y-6">
+              
+//               {/* Online Users List */}
+//               <div className="bg-gray-800 p-6 rounded-2xl border border-gray-700">
+//                 <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4 flex items-center gap-2">
+//                   <Users className="w-4 h-4" /> Available Users
+//                 </h3>
+//                 <div className="space-y-2 max-h-40 overflow-y-auto custom-scrollbar">
+//                   {onlineUsers.filter(u => u !== username).map((user) => (
+//                     <div key={user} className="flex items-center justify-between p-3 bg-gray-900 rounded-lg hover:bg-gray-700/50 transition">
+//                       <span className="text-sm text-green-400 font-mono">● {user}</span>
+//                       <button 
+//                         onClick={() => { setTargetUser(user); handleConnect(); }}
+//                         className="text-xs px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded font-bold transition"
+//                       >
+//                         Connect
+//                       </button>
+//                     </div>
+//                   ))}
+//                   {onlineUsers.filter(u => u !== username).length === 0 && (
+//                     <p className="text-xs text-gray-500 italic">No other users online.</p>
+//                   )}
+//                 </div>
+//               </div>
+
+//               {/* Manual Connect (Backup) */}
+//               <div className="bg-gray-800 p-6 rounded-2xl border border-gray-700">
+//                  <div className="flex gap-2">
+//                   <input 
+//                     className="flex-1 bg-gray-900 border border-gray-600 rounded-lg p-2 text-sm text-white outline-none"
+//                     placeholder="Or type username..."
+//                     value={targetUser}
+//                     onChange={e => setTargetUser(e.target.value)}
+//                   />
+//                   <button onClick={handleConnect} className="bg-gray-700 hover:bg-gray-600 px-4 rounded-lg text-sm font-bold">
+//                     Handshake
+//                   </button>
+//                 </div>
+//               </div>
+
+//               {/* File Picker */}
+//               <div className="bg-gray-800 p-6 rounded-2xl border border-gray-700">
+//                 <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4">Secure Transfer</h3>
+//                 <FilePicker onFileSelected={startTransfer} disabled={!sharedKeyRef.current} />
+//               </div>
+//             </div>
+
+//             {/* RIGHT COLUMN: Status & Logs */}
+//             <div className="space-y-6">
+
+//              {/* NEW: Received Files List */}
+//               {receivedFiles.length > 0 && (
+//                 <div className="bg-gray-800 p-6 rounded-2xl border border-gray-700 animate-pulse-once">
+//                   <h3 className="text-sm font-semibold text-green-400 uppercase mb-4 flex items-center gap-2">
+//                     📥 Received Files
+//                   </h3>
+//                   <div className="space-y-3">
+//                     {receivedFiles.map((file, idx) => (
+//                       <div key={idx} className="flex items-center justify-between p-3 bg-gray-900 rounded-lg border border-gray-600">
+//                         <span className="text-sm font-mono text-white truncate max-w-[200px]">{file.name}</span>
+//                         <a 
+//                           href={file.url} 
+//                           download={file.name}
+//                           className="bg-green-600 hover:bg-green-500 text-white text-xs font-bold px-3 py-2 rounded flex items-center gap-1 transition"
+//                         >
+//                           Download
+//                         </a>
+//                       </div>
+//                     ))}
+//                   </div>
+//                 </div>
+//               )}
+              
+//               {/* Encryption Status */}
+//               <div className="bg-gray-800 p-6 rounded-2xl border border-gray-700 flex items-center justify-between">
+//                 <div>
+//                   <h3 className="font-bold text-gray-200">Encryption Layer</h3>
+//                   <p className={`text-xs mt-1 ${sharedKeyRef.current ? 'text-green-400' : 'text-yellow-500'}`}>
+//                     {sharedKeyRef.current ? '🔒 AES-GCM-256 (Active)' : '⏳ Waiting for Handshake...'}
+//                   </p>
+//                 </div>
+//                 <ShieldCheck className={`w-10 h-10 ${sharedKeyRef.current ? 'text-green-500' : 'text-gray-600'}`} />
+//               </div>
+
+//               {/* Terminal Logs */}
+//               <div className="bg-black p-4 rounded-xl border border-gray-800 h-96 overflow-hidden flex flex-col font-mono text-xs">
+//                 <div className="flex items-center gap-2 text-gray-500 mb-2 border-b border-gray-800 pb-2">
+//                   <Terminal className="w-4 h-4" /> System Log
+//                 </div>
+//                 <div className="flex-1 overflow-y-auto space-y-1 p-1">
+//                   {logs.map((log, i) => (
+//                     <div key={i} className="text-green-400 break-words border-l-2 border-green-900 pl-2">
+//                       <span className="text-gray-600">[{new Date().toLocaleTimeString()}]</span> {log}
+//                     </div>
+//                   ))}
+//                 </div>
+//               </div>
+
+//               {/* Progress Bar */}
+//               {progress > 0 && (
+//                 <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
+//                   <div 
+//                     className="bg-gradient-to-r from-blue-500 to-purple-500 h-3 transition-all duration-300 ease-out" 
+//                     style={{ width: `${progress}%` }}
+//                   ></div>
+//                 </div>
+//               )}
+//             </div>
+//           </div>
+//         )}
+//       </div>
+//     </div>
+//   );
+// };
