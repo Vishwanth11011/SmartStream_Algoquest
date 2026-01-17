@@ -1,0 +1,51 @@
+# --- System & IDE Files ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- General Dependencies & Logs ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Environment Variables (Security) ---
+.env
+.env.local
+.env.*
+
+# =========================
+# 🖥️ CLIENT (React/Vite)
+# =========================
+client/dist/
+client/build/
+client/coverage/
+client/.eslintcache
+
+# =========================
+# 🔌 SERVER (Node.js)
+# =========================
+server/dist/
+server/logs/
+server/*.log
+
+# =========================
+# 🧠 AI & PYTHON
+# =========================
+# 1. Python Cache & Virtual Envs
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# 2. Datasets (CRITICAL)
+# Ignore the Silesia corpus and synthetic data (can be re-downloaded via script)
+ai-training/dataset/
+
+# 3. Generated Models
+# Note: Usually we ignore generated artifacts. 
+# If you want to commit the trained model, remove the line below.
+# client/public/model.onnx

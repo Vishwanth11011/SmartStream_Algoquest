@@ -1,0 +1,29 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              Int      @id @default(autoincrement())
+  username        String   @unique
+  email           String   @unique
+  password        String
+  securityQuestion String
+  securityAnswer  String
+  createdAt       DateTime @default(now())
+}
+
+model TransferHistory {
+  id              Int      @id @default(autoincrement())
+  fileSize        Float
+  compressedSize  Float?
+  compressionAlgo String?
+  senderId        Int
+  receiverId      Int
+  timestamp       DateTime @default(now())
+  status          String
+}
