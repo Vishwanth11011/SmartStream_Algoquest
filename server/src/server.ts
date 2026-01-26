@@ -27,23 +27,20 @@ io.on('connection', (socket) => {
   });
 
   // 2. The Relay (Heart of the App)
-  socket.on('file-relay', (data) => {
+  // Update the 'file-relay' listener:
+  socket.on('file-relay', (data, ackCallback) => { // <--- Accept Callback
     const { targetUsername, payload } = data;
     
-    // Find target socket ID
-    const targetEntry = Array.from(userRegistry.entries()).find(([id, name]) => name === targetUsername);
+    const targetEntry = Array.from(userRegistry.entries()).find(([_, name]) => name === targetUsername);
     
     if (targetEntry) {
       const [targetSocketId, _] = targetEntry;
-      const senderName = userRegistry.get(socket.id); // Get Sender Name
+      const senderName = userRegistry.get(socket.id);
 
-      // ⚠️ CRITICAL FIX: Attach 'from' username so Receiver knows who sent it
-      io.to(targetSocketId).emit('file-relay', {
-        from: senderName, 
-        payload: payload
+      // Relay to Receiver AND pass a new callback that triggers the Sender's callback
+      io.to(targetSocketId).emit('file-relay', { from: senderName, payload }, (responseFromReceiver: any) => {
+        if (ackCallback) ackCallback(responseFromReceiver); // <--- Close the loop
       });
-    } else {
-      console.warn(`⚠️ Delivery failed. User ${targetUsername} not found.`);
     }
   });
 
