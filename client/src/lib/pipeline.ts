@@ -1,7 +1,7 @@
 // client/src/lib/pipeline.ts
 import { encryptChunk, decryptChunk } from './crypto';
 
-const CHUNK_SIZE = 32 * 1024; // 64KB chunks (Optimal for WebRTC/Socket.io)
+const CHUNK_SIZE = 25 * 1024; // 64KB chunks (Optimal for WebRTC/Socket.io)
 
 /**
  * 📤 SENDER PIPELINE
