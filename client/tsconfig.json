@@ -7,7 +7,7 @@
   
   "compilerOptions": {
     "jsx": "react-jsx",          // Vital: Enables modern React JSX transform
-    "lib": ["DOM", "ESNext"],    // Vital: Fixes Uint8Array / ArrayBuffer errors
+    "lib": ["DOM", "DOM.Iterable", "ESNext"],    // Vital: Fixes Uint8Array / ArrayBuffer errors
     "moduleResolution": "node",
     "skipLibCheck": true,        // Recommended: Ignores errors in node_modules types
     // ... keep your other settings
