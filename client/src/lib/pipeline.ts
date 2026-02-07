@@ -41,7 +41,7 @@ export const sendFilePipeline = async (
         if (buffer.length > 0) {
           try {
             const encrypted = await encryptChunk(sharedKey, buffer);
-            await onChunk(encrypted);
+            await onChunk(encrypted as any);
             finalSize += encrypted.byteLength;
           } catch (e) { console.error("Chunk Error (Final):", e); badChunks++; }
         }
@@ -61,7 +61,7 @@ export const sendFilePipeline = async (
 
         try {
           const encrypted = await encryptChunk(sharedKey, chunk);
-          await onChunk(encrypted);
+          await onChunk(encrypted as any);
           finalSize += encrypted.byteLength;
         } catch (e) {
           console.error("Chunk Error:", e);

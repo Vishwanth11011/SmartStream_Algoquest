@@ -7,7 +7,7 @@ import { sendFilePipeline, ReceiverPipeline } from '../lib/pipeline';
 import { FilePicker } from './FilePicker';
 import { 
   Cpu, Wifi, Download, Bell, Lock, Activity, Layers, 
-  LogOut, Search, UserCheck, Link2Off, Zap, Shield, 
+  LogOut, Search,  Link2Off, Zap, 
   Terminal, Signal, Loader2, UserX 
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -31,9 +31,9 @@ export const TransferRoom = () => {
   const navigate = useNavigate();
   
   // --- STATE ---
-  const [username, setUsername] = useState(localStorage.getItem('username') || '');
+  const [username] = useState(localStorage.getItem('username') || '');
   const [status, setStatus] = useState('Connecting...');
-  const [onlineUsers, setOnlineUsers] = useState<string[]>([]);
+  const [, setOnlineUsers] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<string | null>(null);
   const [targetUser, setTargetUser] = useState('');

@@ -36,7 +36,7 @@ export const encryptChunk = async (key: CryptoKey, chunk: Uint8Array): Promise<U
   const encrypted = await window.crypto.subtle.encrypt(
     { name: "AES-GCM", iv: iv },
     key,
-    chunk 
+    chunk as any
   );
 
   const packageData = new Uint8Array(iv.length + encrypted.byteLength);

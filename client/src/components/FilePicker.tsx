@@ -1,6 +1,6 @@
 import React, { useCallback, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { UploadCloud, Loader2, Cpu, AlertCircle, CheckCircle, FileWarning } from 'lucide-react';
+import { UploadCloud, Cpu, AlertCircle, FileWarning } from 'lucide-react';
 import { analyzeFile } from '../lib/ai';
 
 // SERVER URL for AI Metadata Sync

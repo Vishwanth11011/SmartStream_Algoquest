@@ -104,14 +104,14 @@ export const AuthPage = () => {
                   exit={{ height: 0, opacity: 0 }}
                   className="space-y-4 overflow-hidden"
                 >
-                  <InputGroup icon={User} placeholder="Full Name" value={formData.fullName} onChange={e => setFormData({...formData, fullName: e.target.value})} />
-                  <InputGroup icon={Mail} placeholder="Email Address" type="email" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} />
+                  <InputGroup icon={User} placeholder="Full Name" value={formData.fullName} onChange={(e:any) => setFormData({...formData, fullName: e.target.value})} />
+                  <InputGroup icon={Mail} placeholder="Email Address" type="email" value={formData.email} onChange={(e:any) => setFormData({...formData, email: e.target.value})} />
                 </motion.div>
               )}
             </AnimatePresence>
 
-            <InputGroup icon={User} placeholder="Username" value={formData.username} onChange={e => setFormData({...formData, username: e.target.value})} />
-            <InputGroup icon={Lock} placeholder="Password" type="password" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} />
+            <InputGroup icon={User} placeholder="Username" value={formData.username} onChange={(e:any) => setFormData({...formData, username: e.target.value})} />
+            <InputGroup icon={Lock} placeholder="Password" type="password" value={formData.password} onChange={(e:any) => setFormData({...formData, password: e.target.value})} />
 
             {/* RESTORED: SECURITY QUESTION DROPDOWN & ANSWER */}
             {!isLogin && (
@@ -136,7 +136,7 @@ export const AuthPage = () => {
                   icon={Lock} 
                   placeholder="Security Answer" 
                   value={formData.securityAnswer} 
-                  onChange={e => setFormData({...formData, securityAnswer: e.target.value})} 
+                  onChange={(e:any) => setFormData({...formData, securityAnswer: e.target.value})} 
                 />
               </motion.div>
             )}

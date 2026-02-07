@@ -170,14 +170,15 @@ export class P2PManager {
           console.log(`\n🎯 FOUND ${targetUsername}! Peer ID: ${response.peerId}`);
           console.log('📡 Initiating WebRTC connection...\n');
           
-          // Create the connection
-          const conn = this.peer.connect(response.peerId, {
-            reliable: true,
-            ordered: true,
-          });
-          
-          // Setup listeners immediately
-          this.setupConnection(conn);
+          if (this.peer) {
+    const conn = this.peer.connect(response.peerId, {
+        reliable: true,
+        ordered: true
+    } as any); 
+
+    // ✅ MOVE THIS INSIDE THE IF BLOCK
+    this.setupConnection(conn);
+}
         } else {
           if (retriesLeft > 0) {
             console.log(`⏳ "${targetUsername}" not found yet - waiting for them to click "Start Node"...`);
@@ -199,7 +200,6 @@ export class P2PManager {
   // Setup listeners for the data channel
   private setupConnection(conn: DataConnection) {
     this.conn = conn;
-    let iceFailureTimeout: ReturnType<typeof setTimeout>;
     let connectionEstablished = false;
 
     // Force connection after 10 seconds if it hasn't opened
@@ -221,7 +221,7 @@ export class P2PManager {
     conn.peerConnection.oniceconnectionstatechange = () => {
       const state = conn.peerConnection.iceConnectionState;
       console.log(`❄️ ICE State: ${state}`);
-      
+      let iceFailureTimeout: any = null;
       switch(state) {
         case 'checking':
           console.log('🔍 ICE is checking candidates...');
@@ -259,13 +259,14 @@ export class P2PManager {
       if (state === 'failed') {
         clearTimeout(forceConnectionTimeout);
         this.onError('Peer connection failed');
-      } else if (state === 'connected' || state === 'completed') {
+      } else if (state === 'connected' || (state as string) === 'completed') {
         console.log('✅ Peer connection established at RTCPeerConnection level');
       }
     };
 
     // Monitor ICE candidates
     conn.peerConnection.onicecandidate = (event) => {
+      
       if (event.candidate) {
         console.log(`🧊 ICE Candidate (${event.candidate.type}):`, event.candidate.candidate.substring(0, 100));
       } else {
@@ -274,6 +275,7 @@ export class P2PManager {
     };
 
     conn.on('open', () => {
+      let iceFailureTimeout: any = null;
       console.log("🤝 ✅✅✅ Connection Open! Data channel is ready! ✅✅✅");
       connectionEstablished = true;
       clearTimeout(iceFailureTimeout);
@@ -287,6 +289,7 @@ export class P2PManager {
     });
 
     conn.on('error', (err) => {
+      let iceFailureTimeout: any = null;
       console.error("❌ Connection Error:", err);
       clearTimeout(iceFailureTimeout);
       clearTimeout(forceConnectionTimeout);

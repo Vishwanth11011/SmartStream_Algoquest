@@ -4,7 +4,7 @@ import { TransferRoom } from './components/TransferRoom';
 
 // 🔒 PROTECTED ROUTE COMPONENT
 // This wrapper checks if the user is logged in before letting them see the page.
-const ProtectedRoute = ({ children }: { children: JSX.Element }) => {
+const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   const token = localStorage.getItem('token');
   
   if (!token) {
