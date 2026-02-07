@@ -6,13 +6,7 @@
  * Model Type: Entropy-Based Decision Tree
  */
 
-interface AIAnalysisResult {
-  algo: string;
-  confidence: number;
-  reason: string;
-}
-
-// 1. Feature Extraction (The "Eyes" of the AI)
+// 1. Feature Extraction
 function calculateFeatures(data: Uint8Array) {
   const frequencies = new Array(256).fill(0);
   for (const byte of data) frequencies[byte]++;
@@ -31,17 +25,19 @@ export async function analyzeFile(file: File): Promise<string> {
   const startTime = performance.now();
   
   // 1. FAST PATH: Structural Analysis (File Headers)
-  // Our model learned that these formats are NEVER compressible.
+  // Skip known compressed formats to save CPU
   const SKIP_EXTENSIONS = new Set(['mp4', 'mkv', 'avi', 'mov', 'webm', 'jpg', 'jpeg', 'png', 'zip', 'rar', '7z', 'gz', 'mp3']);
   const ext = file.name.split('.').pop()?.toLowerCase() || '';
   
   if (SKIP_EXTENSIONS.has(ext)) {
-    console.log(`🤖 AI (Fast-Path): Skipping ${file.name} (Known Compressed Format)`);
+    console.group(`🤖 AI Fast-Path: ${file.name}`);
+    console.log(`Reason: Known Compressed Format (.${ext})`);
+    console.log(`Recommendation: NONE`);
+    console.groupEnd();
     return 'None';
   }
 
   // 2. DEEP PATH: Content Analysis (First 16KB Sample)
-  // We feed this sample into our logic derived from the Silesia dataset.
   const sampleSize = Math.min(file.size, 16 * 1024); 
   const buffer = await file.slice(0, sampleSize).arrayBuffer();
   const data = new Uint8Array(buffer);
@@ -49,24 +45,24 @@ export async function analyzeFile(file: File): Promise<string> {
   const { entropy } = calculateFeatures(data);
   const inferenceTime = (performance.now() - startTime).toFixed(2);
 
-  // 3. INFERENCE LOGIC (The "Silesia" Thresholds)
-  // Silesia Corpus Findings:
-  // - Text/XML/Source Code: Entropy 3.0 - 5.5  -> HIGH Compression
-  // - Binaries/Executables: Entropy 5.5 - 7.5  -> LOW Compression
-  // - Encrypted/Compressed: Entropy 7.5 - 8.0  -> NO Compression
-
-  console.log(`🧠 AI Inference (${inferenceTime}ms) | Entropy: ${entropy.toFixed(3)}`);
+  // 3. INFERENCE LOGIC (Decision Tree)
+  let recommendation = 'Gzip'; // Default for text/code/logs
 
   if (entropy > 7.5) {
-    // High randomness (Likely encrypted or already compressed)
-    return 'None';
-  } 
-  
-  if (entropy > 6.5) {
-    // Moderate randomness (Binaries, executables). Gzip helps a little.
-    return 'Gzip'; 
+    recommendation = 'None'; // High randomness (Encrypted/Compressed)
+  } else if (entropy > 6.0) {
+    recommendation = 'Gzip'; // Moderate randomness (Binaries)
+  } else {
+    recommendation = 'Brotli'; // Low randomness (Text/Source Code) - Highly compressible
   }
 
-  // Low entropy (Text, HTML, JSON, Logs). Gzip is massive here.
-  return 'Gzip';
+  // 4. ✅ DETAILED CONSOLE OUTPUT
+  console.group(`🧠 AI Analysis Report: ${file.name}`);
+  console.log(`📊 Entropy Score:  ${entropy.toFixed(4)} / 8.0000`);
+  console.log(`⏱️ Inference Time: ${inferenceTime}ms`);
+  console.log(`📂 File Type:      ${file.type || 'Unknown'}`);
+  console.log(`🤖 AI Recommendation: %c${recommendation.toUpperCase()}`, 'color: #22D3EE; font-weight: bold;');
+  console.groupEnd();
+
+  return recommendation;
 }

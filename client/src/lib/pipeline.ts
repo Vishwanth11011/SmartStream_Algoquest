@@ -1,240 +1,188 @@
 // client/src/lib/pipeline.ts
-import imageCompression from 'browser-image-compression';
+import { encryptChunk, decryptChunk } from './crypto';
 
-// ==========================================
-// 🧠 SMART CONFIGURATION
-// ==========================================
-const CHUNK_SIZE = 1024 * 1024; // 1MB (Optimal for Local & Internet speed)
+const CHUNK_SIZE = 64 * 1024; // 64KB chunks (Optimal for WebRTC/Socket.io)
 
-// Files that are ALREADY compressed. Re-compressing these wastes CPU.
-const ALREADY_COMPRESSED = new Set([
-  'mp4', 'mkv', 'avi', 'mov', 'webm', // Video
-  'jpg', 'jpeg', 'png', 'gif', 'webp', // Image
-  'zip', 'rar', '7z', 'gz', 'mp3', 'aac' // Archives/Audio
-]);
-
-// ==========================================
-// 🛠️ HELPER ENGINES
-// ==========================================
-
-// 1. IMAGE OPTIMIZER (The "Hackathon Winner" Feature)
-// Converts heavy PNG/JPGs to efficient WebP format.
-async function optimizeImage(file: File): Promise<File> {
-  try {
-    const options = {
-      maxSizeMB: 1,           // Target size ~1MB
-      maxWidthOrHeight: 1920, // 1080p Resolution
-      useWebWorker: true,     // Run in background thread
-      fileType: 'image/webp'  // Next-Gen format
-    };
-    const compressedFile = await imageCompression(file, options);
-    return compressedFile;
-  } catch (e) {
-    // If optimization fails, silently return original file
-    return file; 
-  }
-}
-
-// 2. NATIVE GZIP COMPRESSOR (Browser C++ Engine)
-async function compressChunk(chunk: Uint8Array): Promise<{ data: Uint8Array, failed: boolean }> {
-  try {
-    const stream = new CompressionStream('gzip');
-    const writer = stream.writable.getWriter();
-    writer.write(chunk);
-    writer.close();
-    
-    const result = await new Response(stream.readable).arrayBuffer();
-    return { data: new Uint8Array(result), failed: false };
-  } catch (e) {
-    // Fallback to raw data if compression fails
-    return { data: chunk, failed: true };
-  }
-}
-
-// 3. NATIVE GZIP DECOMPRESSOR
-async function decompressChunk(chunk: Uint8Array): Promise<{ data: Uint8Array, failed: boolean }> {
-  try {
-    const stream = new DecompressionStream('gzip');
-    const writer = stream.writable.getWriter();
-    writer.write(chunk);
-    writer.close();
-
-    const result = await new Response(stream.readable).arrayBuffer();
-    return { data: new Uint8Array(result), failed: false };
-  } catch (e) {
-    console.warn("⚠️ Decompression failed. Using Raw fallback.");
-    return { data: chunk, failed: true };
-  }
-}
-
-// ==========================================
-// 🚀 SENDER PIPELINE
-// ==========================================
-export async function sendFilePipeline(
-  originalFile: File, 
-  key: CryptoKey, 
-  aiSuggestion: string, // The suggestion from your ai.ts
-  callback: (chunk: Uint8Array) => Promise<void>
-) {
-  let fileToSend = originalFile;
-  let finalAlgo = 'None';
-
-  console.log(`🚀 PIPELINE START: ${originalFile.name} (AI Said: ${aiSuggestion})`);
-
-  // --- STEP 1: APPLY SMART STRATEGY ---
-  
-  const ext = originalFile.name.split('.').pop()?.toLowerCase() || '';
-
-  // A. MEDIA OPTIMIZATION (Images)
-  if (originalFile.type.startsWith('image/') && !ALREADY_COMPRESSED.has(ext)) {
-    console.log("🎨 Strategy: Smart Image Optimization (WebP)");
-    fileToSend = await optimizeImage(originalFile);
-    console.log(`📉 Size Reduced: ${(originalFile.size/1024).toFixed(0)}KB -> ${(fileToSend.size/1024).toFixed(0)}KB`);
-    finalAlgo = 'None'; // It's already optimized, don't Gzip it!
-  }
-  // B. MEDIA BYPASS (Video/Zip)
-  else if (ALREADY_COMPRESSED.has(ext)) {
-    console.log("⏩ Strategy: Direct Stream (Max Speed)");
-    finalAlgo = 'None';
-  }
-  // C. TEXT/DATA COMPRESSION (Everything else)
-  else {
-    // Trust the AI logic from ai.ts (Silesia Distilled Model)
-    // If AI said Gzip, we use Gzip.
-    if (aiSuggestion === 'Gzip') {
-      console.log("📦 Strategy: Native Gzip Compression");
-      finalAlgo = 'Gzip';
-    } else {
-      finalAlgo = 'None';
-    }
-  }
-
-  // --- STEP 2: TRANSFER LOOP ---
-  
-  let offset = 0;
-  let bandwidthUsed = 0;
-  let badChunks = 0;
+/**
+ * 📤 SENDER PIPELINE
+ * 1. Compress (Optional) -> 2. Encrypt -> 3. Send
+ */
+export const sendFilePipeline = async (
+  file: File,
+  sharedKey: CryptoKey,
+  algo: string,
+  onChunk: (chunk: ArrayBuffer) => Promise<void>
+) => {
   const startTime = performance.now();
+  let originalSize = file.size;
+  let finalSize = 0;
+  let badChunks = 0;
 
-  while (offset < fileToSend.size) {
-    const chunkBlob = fileToSend.slice(offset, offset + CHUNK_SIZE);
-    const buffer = await chunkBlob.arrayBuffer();
-    let data = new Uint8Array(buffer);
+  // 1. CREATE STREAM SOURCE
+  let stream = file.stream();
 
-    // 1. Compress (if strategy is Gzip)
-    if (finalAlgo === 'Gzip') {
-      const { data: compressed, failed } = await compressChunk(data);
-      if (failed) badChunks++;
-      else data = compressed;
+  // 2. APPLY COMPRESSION (The Missing Link)
+  // Note: Browsers use 'deflate' as the closest standard to Brotli
+  if (algo === 'Gzip') {
+    stream = stream.pipeThrough(new CompressionStream('gzip'));
+  } else if (algo === 'Brotli') {
+    stream = stream.pipeThrough(new CompressionStream('deflate')); 
+  }
+
+  // 3. READ & PROCESS
+  const reader = stream.getReader();
+  let buffer = new Uint8Array(0); // Buffer to accumulate variable chunk sizes
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        // Process any remaining bytes in buffer
+        if (buffer.length > 0) {
+          try {
+            const encrypted = await encryptChunk(sharedKey, buffer);
+            await onChunk(encrypted);
+            finalSize += encrypted.byteLength;
+          } catch (e) { console.error("Chunk Error (Final):", e); badChunks++; }
+        }
+        break;
+      }
+
+      // Append new data to buffer
+      const newBuffer = new Uint8Array(buffer.length + value.length);
+      newBuffer.set(buffer);
+      newBuffer.set(value, buffer.length);
+      buffer = newBuffer;
+
+      // Slice off precise 64KB chunks to keep encryption stable
+      while (buffer.length >= CHUNK_SIZE) {
+        const chunk = buffer.slice(0, CHUNK_SIZE);
+        buffer = buffer.slice(CHUNK_SIZE);
+
+        try {
+          const encrypted = await encryptChunk(sharedKey, chunk);
+          await onChunk(encrypted);
+          finalSize += encrypted.byteLength;
+        } catch (e) {
+          console.error("Chunk Error:", e);
+          badChunks++;
+        }
+      }
     }
-
-    // 2. Encrypt (Always)
-    const iv = window.crypto.getRandomValues(new Uint8Array(12));
-    const encrypted = await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data);
-
-    // 3. Pack (IV + Data)
-    const pkg = new Uint8Array(iv.byteLength + encrypted.byteLength);
-    pkg.set(iv);
-    pkg.set(new Uint8Array(encrypted), iv.byteLength);
-
-    bandwidthUsed += pkg.byteLength;
-
-    // 4. Send
-    await callback(pkg);
-    offset += CHUNK_SIZE;
+  } catch (err) {
+    console.error("Pipeline Error:", err);
+    throw err;
   }
 
   const duration = ((performance.now() - startTime) / 1000).toFixed(2);
-  const speed = (fileToSend.size / 1024 / 1024 / parseFloat(duration)).toFixed(2);
+  const speed = (originalSize / 1024 / 1024 / Number(duration)).toFixed(2);
 
-  console.log(`✅ SENDER DONE. Speed: ${speed} MB/s | Algo Used: ${finalAlgo}`);
-
-  // Return Telemetry for Dashboard
-  return { 
-    originalSize: originalFile.size,
-    finalSize: bandwidthUsed,
+  return {
+    originalSize,
+    finalSize, // If compression worked, this will be smaller!
     duration,
     speed,
-    badChunks,
-    algo: finalAlgo
+    badChunks
   };
-}
+};
 
-// ==========================================
-// 📥 RECEIVER PIPELINE (Store-Then-Process)
-// ==========================================
+
+/**
+ * 📥 RECEIVER PIPELINE
+ * 1. Decrypt -> 2. Decompress (Optional) -> 3. Rebuild File
+ */
+// ... (Keep the sendFilePipeline function as is) ...
+
+/**
+ * 📥 RECEIVER PIPELINE
+ * 1. Decrypt -> 2. Decompress (Optional) -> 3. Rebuild File
+ */
 export class ReceiverPipeline {
   private key: CryptoKey;
   private algo: string;
-  private onComplete: (blob: Blob, stats: any) => void;
-  private rawChunks: Uint8Array[] = [];
+  private writer: WritableStreamDefaultWriter;
   
-  // Stats
-  private bandwidthReceived = 0;
-  private startTime = 0;
+  private receivedChunks: ArrayBuffer[] = [];
+  private totalSize = 0;   // The size of the FINAL (decompressed) file
+  private networkSize = 0; // ✅ NEW: The size of COMPRESSED data received
+  private startTime = performance.now();
+  private badChunks = 0;
 
-  constructor(key: CryptoKey, algo: string, onComplete: (blob: Blob, stats: any) => void) {
-    this.key = key;
+  private onFinish: (blob: Blob, stats: any) => void;
+
+  constructor(sharedKey: CryptoKey, algo: string, onFinish: (blob: Blob, stats: any) => void) {
+    this.key = sharedKey;
     this.algo = algo;
-    this.onComplete = onComplete;
-    this.startTime = performance.now();
-  }
+    this.onFinish = onFinish;
 
-  // 1. Buffer incoming data (Fastest)
-  processChunk(pkg: Uint8Array) {
-    this.bandwidthReceived += pkg.byteLength;
-    this.rawChunks.push(pkg);
-  }
+    // 1. SETUP DECOMPRESSION STREAM
+    let transformStream = new TransformStream(); 
+    const { readable, writable } = transformStream;
+    this.writer = writable.getWriter();
 
-  // 2. Process all at once (Safest)
-  async finish() {
-    console.log(`🏁 PROCESSING ${this.rawChunks.length} chunks...`);
-    const finalData: Uint8Array[] = [];
-    let badChunks = 0;
-    let finalSize = 0;
-
-    for (const pkg of this.rawChunks) {
-      try {
-        const iv = pkg.slice(0, 12);
-        const data = pkg.slice(12);
-
-        // A. Decrypt
-        const decrypted = await window.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, this.key, data);
-        let chunk = new Uint8Array(decrypted);
-
-        // B. Decompress (if needed)
-        if (this.algo === 'Gzip') {
-          const { data: cleanChunk, failed } = await decompressChunk(chunk);
-          if (failed) badChunks++;
-          chunk = cleanChunk;
-        }
-
-        finalData.push(chunk);
-        finalSize += chunk.byteLength;
-      } catch (e) { 
-        console.error("❌ Corrupt Chunk Dropped (Network/Crypto Error)");
-      }
+    let outputStream = readable;
+    
+    if (this.algo === 'Gzip') {
+      outputStream = outputStream.pipeThrough(new DecompressionStream('gzip'));
+    } else if (this.algo === 'Brotli') {
+      outputStream = outputStream.pipeThrough(new DecompressionStream('deflate'));
     }
 
-    const blob = new Blob(finalData);
-    const duration = ((performance.now() - this.startTime) / 1000).toFixed(2);
+    this.readStream(outputStream);
+  }
 
-    const stats = {
-      received: this.bandwidthReceived,
-      finalSize: finalSize,
-      duration: duration,
-      badChunks: badChunks
-    };
+  // Helper to read the decompressed stream (Rebuilding the original file)
+  private async readStream(stream: ReadableStream) {
+    const reader = stream.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        this.receivedChunks.push(value);
+        this.totalSize += value.byteLength; // Tracks Original Size
+      }
+    } catch (e) {
+      console.error("Decompression Error:", e);
+      this.badChunks++;
+    }
+  }
+
+  public async processChunk(chunk: Uint8Array) {
+    // ✅ TRACK NETWORK USAGE HERE (Before processing)
+    this.networkSize += chunk.byteLength; 
+
+    try {
+      // 1. Decrypt
+      const decrypted = await decryptChunk(this.key, chunk);
+      
+      // 2. Push to Decompressor
+      await this.writer.write(decrypted);
+    } catch (e) {
+      console.error("Decryption Failed:", e);
+      this.badChunks++;
+    }
+  }
+
+  public async finish() {
+    await this.writer.close();
+    await new Promise(r => setTimeout(r, 100)); // Flush stream
+
+    const blob = new Blob(this.receivedChunks);
     
-    // Clear RAM
-    this.rawChunks = []; 
-    
-    this.onComplete(blob, stats);
+    const duration = ((performance.now() - this.startTime) / 1000).toFixed(2);
+    // Speed based on ORIGINAL size (User experience speed), or use networkSize for network speed.
+    // Usually "Transfer Speed" implies effective throughput, so originalSize is better for UX.
+    const speed = (this.totalSize / 1024 / 1024 / Number(duration)).toFixed(2);
+
+    this.onFinish(blob, {
+      finalSize: this.networkSize, // ✅ NOW RETURNS COMPRESSED SIZE
+      originalSize: this.totalSize, // Decompressed/Original size
+      duration,
+      speed,
+      badChunks: this.badChunks
+    });
   }
 }
-
-
-
 // //v1.4
 // import imageCompression from 'browser-image-compression';
 

@@ -16,7 +16,7 @@
     "buffer": "^6.0.3",
     "clsx": "^2.1.1",
     "events": "^3.3.0",
-    "framer-motion": "^12.26.2",
+    "framer-motion": "^12.29.2",
     "fzstd": "^0.1.1",
     "lucide-react": "^0.562.0",
     "lz4js": "^0.2.0",
