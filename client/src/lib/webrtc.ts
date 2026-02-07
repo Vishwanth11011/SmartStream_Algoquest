@@ -97,16 +97,23 @@ export class WebRTCManager {
   // Inside client/src/lib/webrtc.ts
 
   // 3. Send Data (Stricter Backpressure)
+  // client/src/lib/webrtc.ts
+
   public async sendData(data: ArrayBuffer): Promise<void> {
     return new Promise((resolve) => {
+      // Safety check
       if (!this.dataChannel || this.dataChannel.readyState !== 'open') return resolve();
 
-      // 🔴 OLD LIMIT: 16MB (Too risky, causes flooding)
-      // 🟢 NEW LIMIT: 64KB (Safe, matches network speed)
-      const MAX_BUFFER = 64 * 1024; 
+      // 🟢 SPEED BOOST CONFIGURATION
+      // Allow up to 1MB of data to sit in the waiting line.
+      // This keeps the upload speed maxed out.
+      const MAX_BUFFER_LIMIT = 1024 * 1024; // 1 MB
+      const LOW_WATER_MARK = 256 * 1024;    // Resume when drops to 256KB
 
-      if (this.dataChannel.bufferedAmount > MAX_BUFFER) {
-        // Wait for buffer to drain completely
+      if (this.dataChannel.bufferedAmount > MAX_BUFFER_LIMIT) {
+        // 🛑 BUFFER FULL: PAUSE
+        // We wait until the buffer drains down to the Low Water Mark
+        // This prevents "Stop-and-Go" stuttering.
         const interval = setInterval(() => {
           if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
             clearInterval(interval);
@@ -114,23 +121,28 @@ export class WebRTCManager {
             return;
           }
           
-          if (this.dataChannel.bufferedAmount === 0) {
+          if (this.dataChannel.bufferedAmount <= LOW_WATER_MARK) {
             clearInterval(interval);
-            this.dataChannel.send(data);
+            try {
+              this.dataChannel.send(data);
+            } catch (e) {
+              console.warn("Packet dropped, retrying...");
+            }
             resolve();
           }
-        }, 10); // Check every 10ms
+        }, 5); // Check frequently (5ms) for responsiveness
       } else {
+        // 🟢 BUFFER OK: SEND IMMEDIATELY
         try {
           this.dataChannel.send(data);
         } catch (e) {
-          console.warn("Send buffer full, retrying...");
-          setTimeout(() => this.sendData(data).then(resolve), 50);
-          return;
+          // If sending fails (rare), just resolve to keep loop moving
+          console.error("Send failed", e);
         }
         resolve();
       }
     });
+  
   }
 
   public close() {
