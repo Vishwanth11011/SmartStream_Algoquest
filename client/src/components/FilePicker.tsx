@@ -3,8 +3,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { UploadCloud, Cpu, AlertCircle, FileWarning } from 'lucide-react';
 import { analyzeFile } from '../lib/ai';
 
-// SERVER URL for AI Metadata Sync
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+// SERVER URL for AI Metadata Sync — prefer `VITE_API_BASE`, fallback to legacy `VITE_SERVER_URL`
+// Prefer `VITE_API_BASE`, then legacy `VITE_SERVER_URL`, then your Render URL, then localhost
+const SERVER_URL = (import.meta.env.VITE_API_BASE as string) || (import.meta.env.VITE_SERVER_URL as string) || 'https://smartstream-algoquest.onrender.com' || 'http://localhost:3001';
 
 interface FilePickerProps {
   onFilesSelected: (files: File[], algos: Map<string, string>) => void;

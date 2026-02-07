@@ -24,7 +24,8 @@ const COLORS = {
   muted: '#9CA3AF'
 };
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'https://smartstream-algoquest.onrender.com';
+// Prefer `VITE_API_BASE`, then legacy `VITE_SERVER_URL`, then your Render URL
+const SERVER_URL = (import.meta.env.VITE_API_BASE as string) || (import.meta.env.VITE_SERVER_URL as string) || 'https://smartstream-algoquest.onrender.com';
 const socket: Socket = io(SERVER_URL, { transports: ['websocket'], reconnectionAttempts: 5 });
 
 export const TransferRoom = () => {
