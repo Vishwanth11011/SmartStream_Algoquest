@@ -38,7 +38,7 @@ export const TransferRoom = () => {
   const [targetUser, setTargetUser] = useState('');
   const [incomingRequest, setIncomingRequest] = useState<{from: string, key: JsonWebKey} | null>(null);
   const [encryptionReady, setEncryptionReady] = useState(false);
-  const [isTransferring, setIsTransferring] = useState(false);
+  const [, setIsTransferring] = useState(false);
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [receivedFiles, setReceivedFiles] = useState<{name: string, url: string}[]>([]);
