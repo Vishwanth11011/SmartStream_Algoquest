@@ -1,12 +1,6 @@
 // client/src/lib/ai.ts
 
-/**
- * 🧠 SMARTSTREAM AI ENGINE (Lightweight Inference)
- * Trained on: Silesia Compression Corpus
- * Model Type: Entropy-Based Decision Tree
- */
-
-// 1. Feature Extraction
+// ... (calculateFeatures function remains the same) ...
 function calculateFeatures(data: Uint8Array) {
   const frequencies = new Array(256).fill(0);
   for (const byte of data) frequencies[byte]++;
@@ -24,18 +18,14 @@ function calculateFeatures(data: Uint8Array) {
 export async function analyzeFile(file: File): Promise<string> {
   const startTime = performance.now();
   
-  // 1. FAST PATH: Structural Analysis (File Headers)
-  // Skip known compressed formats to save CPU
-  const SKIP_EXTENSIONS = new Set(['mp4', 'mkv', 'avi', 'mov', 'webm', 'jpg', 'jpeg', 'png', 'zip', 'rar', '7z', 'gz', 'mp3']);
+  // 1. FAST PATH REMOVED: Force analysis on ALL files
+  /* const SKIP_EXTENSIONS = new Set(['mp4', 'mkv', 'avi', 'mov', 'webm', 'jpg', 'jpeg', 'png', 'zip', 'rar', '7z', 'gz', 'mp3']);
   const ext = file.name.split('.').pop()?.toLowerCase() || '';
   
   if (SKIP_EXTENSIONS.has(ext)) {
-    console.group(`🤖 AI Fast-Path: ${file.name}`);
-    console.log(`Reason: Known Compressed Format (.${ext})`);
-    console.log(`Recommendation: NONE`);
-    console.groupEnd();
     return 'None';
   }
+  */
 
   // 2. DEEP PATH: Content Analysis (First 16KB Sample)
   const sampleSize = Math.min(file.size, 16 * 1024); 
@@ -45,18 +35,24 @@ export async function analyzeFile(file: File): Promise<string> {
   const { entropy } = calculateFeatures(data);
   const inferenceTime = (performance.now() - startTime).toFixed(2);
 
-  // 3. INFERENCE LOGIC (Decision Tree)
-  let recommendation = 'Gzip'; // Default for text/code/logs
+  // 3. FORCED LOGIC
+  // Even if entropy is high (random), we default to 'Gzip' to try and squeeze 
+  // out any remaining patterns (like metadata headers in MP4s).
+  let recommendation = 'Gzip'; 
 
-  if (entropy > 7.5) {
-    recommendation = 'None'; // High randomness (Encrypted/Compressed)
-  } else if (entropy > 6.0) {
-    recommendation = 'Gzip'; // Moderate randomness (Binaries)
+  // Special Handling: PDFs often benefit from Brotli despite high entropy
+  const ext = file.name.split('.').pop()?.toLowerCase();
+  if (ext === 'pdf') {
+     recommendation = 'Brotli';
+  }
+  // Standard Logic (Modified to be aggressive)
+  else if (entropy < 6.0) {
+     recommendation = 'Brotli'; // Text/Code/Logs -> Aggressive Compression
   } else {
-    recommendation = 'Brotli'; // Low randomness (Text/Source Code) - Highly compressible
+     recommendation = 'Gzip';   // Video/Images -> Fast Compression
   }
 
-  // 4. ✅ DETAILED CONSOLE OUTPUT
+  // 4. Console Output
   console.group(`🧠 AI Analysis Report: ${file.name}`);
   console.log(`📊 Entropy Score:  ${entropy.toFixed(4)} / 8.0000`);
   console.log(`⏱️ Inference Time: ${inferenceTime}ms`);
