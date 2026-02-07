@@ -210,57 +210,80 @@ export const TransferRoom = () => {
   };
 
   const startBatchTransfer = async (files: File[], algos: Map<string, string>) => {
-    // 1. Strict Checks
+    // 1. STRICT CHECKS
     if (!webrtcRef.current || p2pState !== 'connected' || !sharedKeyRef.current) {
       return alert("P2P Connection not ready! Please wait for the green light.");
     }
     
-    // 2. Capture Reference (Safety against null)
+    // 2. CAPTURE REFS (Safety against null mid-loop)
     const p2pManager = webrtcRef.current;
     const sharedKey = sharedKeyRef.current;
+    const encoder = new window.TextEncoder();
 
     setIsTransferring(true);
-    // ✅ FIX 1: Use window.TextEncoder explicitly
-    const encoder = new window.TextEncoder();
 
     try {
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const algo = algos.get(file.name) || 'None';
+        
         setQueueStatus(`Sending ${i + 1}/${files.length}: ${file.name}`);
         addLog(`Uploading "${file.name}"...`);
         setProgress(0);
         setTransferStats(null);
 
-        // A. Send Metadata
-        const startMeta = JSON.stringify({ type: 'file-start', name: file.name, algo });
-        // ✅ FIX 2: Cast to 'any' to prevent ArrayBuffer vs Uint8Array mismatch
+        // A. SEND METADATA (Start)
+        const startMeta = JSON.stringify({ 
+          type: 'file-start', 
+          name: file.name, 
+          algo: algo 
+        });
         await p2pManager.sendData(encoder.encode(startMeta) as any);
 
-        // B. Send Chunks
+        // B. SEND CHUNKS (Pipeline)
         const stats = await sendFilePipeline(file, sharedKey, algo, async (chunk) => {
-           // ✅ FIX 2: Cast to 'any' here too just in case
            await p2pManager.sendData(chunk as any); 
-           setProgress(p => (p >= 95 ? 95 : p + 0.1));
+           // Update progress smoothly
+           setProgress(p => (p >= 98 ? 98 : p + 0.1));
         });
 
-        // C. Send End
+        // 🛑 CRITICAL: DRAIN BUFFER
+        // Wait until the browser has actually sent everything before sending "End"
+        await new Promise<void>(resolve => {
+           const checkInterval = setInterval(() => {
+              // Access internal channel safely to check buffer
+              // @ts-ignore
+              const channel = p2pManager.dataChannel;
+              if (channel && channel.bufferedAmount === 0) {
+                 clearInterval(checkInterval);
+                 resolve();
+              }
+           }, 50); // Check every 50ms
+        });
+
+        // C. SEND END SIGNAL
         const endMeta = JSON.stringify({ type: 'file-end' });
-        // ✅ FIX 2: Cast to 'any'
         await p2pManager.sendData(encoder.encode(endMeta) as any);
 
+        // D. LOG SUCCESS
         setTransferStats(stats);
         addLog(`Sent: "${file.name}"`);
         setProgress(100);
+        
+        // Small pause before next file to ensure receiver processes 'end'
         await new Promise(r => setTimeout(r, 200)); 
       }
+
       setQueueStatus('');
       addLog("Batch Transfer Complete");
+
     } catch (e) {
-      addLog("Transfer Interrupted");
-      console.error(e);
+      addLog("❌ Transfer Interrupted");
+      console.error("Transfer Error:", e);
+      alert("Transfer failed. Please check console for details.");
     } finally {
       setIsTransferring(false);
+      setProgress(0);
     }
   };
 

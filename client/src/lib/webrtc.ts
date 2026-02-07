@@ -94,23 +94,40 @@ export class WebRTCManager {
   }
 
   // 3. Send Data (With Backpressure for Speed)
+  // Inside client/src/lib/webrtc.ts
+
+  // 3. Send Data (Stricter Backpressure)
   public async sendData(data: ArrayBuffer): Promise<void> {
     return new Promise((resolve) => {
       if (!this.dataChannel || this.dataChannel.readyState !== 'open') return resolve();
 
-      // BACKPRESSURE LOGIC:
-      // If the buffer is full (16MB), wait for it to drain. 
-      // This prevents the browser from crashing on large files.
-      if (this.dataChannel.bufferedAmount > 16 * 1024 * 1024) {
+      // 🔴 OLD LIMIT: 16MB (Too risky, causes flooding)
+      // 🟢 NEW LIMIT: 64KB (Safe, matches network speed)
+      const MAX_BUFFER = 64 * 1024; 
+
+      if (this.dataChannel.bufferedAmount > MAX_BUFFER) {
+        // Wait for buffer to drain completely
         const interval = setInterval(() => {
-          if (this.dataChannel!.bufferedAmount < 4 * 1024 * 1024) {
+          if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
             clearInterval(interval);
-            this.dataChannel!.send(data);
+            resolve();
+            return;
+          }
+          
+          if (this.dataChannel.bufferedAmount === 0) {
+            clearInterval(interval);
+            this.dataChannel.send(data);
             resolve();
           }
-        }, 50);
+        }, 10); // Check every 10ms
       } else {
-        this.dataChannel.send(data);
+        try {
+          this.dataChannel.send(data);
+        } catch (e) {
+          console.warn("Send buffer full, retrying...");
+          setTimeout(() => this.sendData(data).then(resolve), 50);
+          return;
+        }
         resolve();
       }
     });
