@@ -218,38 +218,66 @@ export const TransferRoom = () => {
   };
 
   const startBatchTransfer = async (files: File[], algos: Map<string, string>) => {
-    if (!encryptionReady || !sharedKeyRef.current) return alert("Please connect to a peer first!");
-    setIsTransferring(true);
-    try {
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const algo = algos.get(file.name) || 'None';
-        setQueueStatus(`Transferring ${i + 1}/${files.length}: ${file.name}`);
-        addLog(`Uploading "${file.name}"...`);
-        setProgress(0);
-        setTransferStats(null);
-        socket.emit('file-relay', { targetUsername: targetUser, payload: { type: 'file-start', name: file.name, algo: algo } });
-        await new Promise(r => setTimeout(r, 50));
-        const stats = await sendFilePipeline(file, sharedKeyRef.current, algo, async (chunk) => {
-          await new Promise<void>((resolve) => {
-            socket.emit('file-relay', { targetUsername: targetUser, payload: { type: 'file-chunk', chunk } }, () => resolve());
+  if (!encryptionReady || !sharedKeyRef.current) return alert("Please connect to a peer first!");
+  setIsTransferring(true);
+
+  try {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const algo = algos.get(file.name) || 'None';
+      
+      setQueueStatus(`Transferring ${i + 1}/${files.length}: ${file.name}`);
+      addLog(`Uploading "${file.name}"...`);
+      setProgress(0);
+      setTransferStats(null);
+
+      // 1. Notify Receiver
+      socket.emit('file-relay', { targetUsername: targetUser, payload: { type: 'file-start', name: file.name, algo: algo } });
+      await new Promise(r => setTimeout(r, 50));
+
+      // 2. OPTIMIZED PIPELINE (Windowed Sending)
+      let chunksInFlight = 0;
+      const MAX_IN_FLIGHT = 3; // Allow 3 chunks to be "in the air" at once
+
+      const stats = await sendFilePipeline(file, sharedKeyRef.current, algo, async (chunk) => {
+        
+        // A. Send the chunk immediately (Don't await yet)
+        const ackPromise = new Promise<void>((resolve) => {
+          socket.emit('file-relay', { targetUsername: targetUser, payload: { type: 'file-chunk', chunk } }, () => {
+            chunksInFlight--;
+            resolve();
           });
-          setProgress(p => (p >= 95 ? 95 : p + 0.5));
         });
-        setTransferStats(stats);
-        socket.emit('file-relay', { targetUsername: targetUser, payload: { type: 'file-end' }});
-        addLog(`Sent: "${file.name}"`);
-        setProgress(100);
-        await new Promise(r => setTimeout(r, 500));
-      }
-      setQueueStatus('');
-      addLog("Batch Transfer Complete");
-    } catch (e) {
-      addLog("Transfer Interrupted");
-    } finally {
-      setIsTransferring(false);
+
+        chunksInFlight++;
+
+        // B. Only wait if we have too many chunks in flight (Flow Control)
+        if (chunksInFlight >= MAX_IN_FLIGHT) {
+          await ackPromise;
+        }
+
+        setProgress(p => (p >= 95 ? 95 : p + 0.5));
+      });
+
+      // 3. Wait for remaining chunks to land
+      while (chunksInFlight > 0) await new Promise(r => setTimeout(r, 50));
+
+      setTransferStats(stats);
+      socket.emit('file-relay', { targetUsername: targetUser, payload: { type: 'file-end' }});
+      
+      addLog(`Sent: "${file.name}"`);
+      setProgress(100);
+      await new Promise(r => setTimeout(r, 500));
     }
-  };
+    setQueueStatus('');
+    addLog("Batch Transfer Complete");
+  } catch (e) {
+    console.error(e);
+    addLog("Transfer Interrupted");
+  } finally {
+    setIsTransferring(false);
+  }
+};
 
   return (
     <div className="min-h-screen font-sans selection:bg-blue-500/30" style={{ backgroundColor: COLORS.bg, color: COLORS.text }}>
