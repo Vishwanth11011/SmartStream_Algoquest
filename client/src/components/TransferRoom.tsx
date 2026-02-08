@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { generateKeyPair, exportPublicKey, importPublicKey, deriveSharedKey } from '../lib/crypto';
 import { sendFilePipeline, ReceiverPipeline } from '../lib/pipeline';
 import { WebRTCManager } from '../lib/webrtc'; 
-import { processFile } from '../lib/compression'; // ✅ Using the new generic compressor
+import { processFile } from '../lib/compression'; // ✅ FIX: Use 'processFile' not 'compressImage'
 import { FilePicker } from './FilePicker';
 import { 
   Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Link2Off, Zap, Terminal, Signal, Loader2, UserX, Search, ChevronDown, UserCheck 
@@ -31,7 +31,7 @@ const decompressBlob = async (blob: Blob): Promise<Blob> => {
   }
 };
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'https://smartstream-algoquest.onrender.com';
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
 const socket: Socket = io(SERVER_URL, { transports: ['websocket', 'polling'], reconnectionAttempts: 5 });
 
 export const TransferRoom = () => {
@@ -47,7 +47,7 @@ export const TransferRoom = () => {
   const [targetUser, setTargetUser] = useState('');
   const [incomingRequest, setIncomingRequest] = useState<{from: string, key: JsonWebKey} | null>(null);
   
-  // New Search States
+  // ✅ FIX: Search States are now used
   const [isSearching, setIsSearching] = useState(false);
   const [verifiedUser, setVerifiedUser] = useState<{name: string, status: string} | null>(null);
 
@@ -81,7 +81,7 @@ export const TransferRoom = () => {
     socket.on('connect', () => { setStatus('Online'); socket.emit('register-user', cleanName); });
     socket.on('disconnect', () => { setStatus('Offline'); setP2pState('disconnected'); });
 
-    // ✅ Listen for User Check (Search Debounce Response)
+    // ✅ LISTEN: User Verification Response
     socket.on('user-status', (data: any) => {
       setIsSearching(false);
       if (data.status === 'online') {
@@ -120,7 +120,7 @@ export const TransferRoom = () => {
     };
   }, [username, navigate]);
 
-  // --- 2. SEARCH DEBOUNCE ---
+  // --- 2. SEARCH DEBOUNCE (Fixes "Blind Connect") ---
   useEffect(() => {
     const delayDebounceFn = setTimeout(() => {
       if (searchQuery.length > 2 && searchQuery !== username) {
@@ -170,7 +170,7 @@ export const TransferRoom = () => {
           if (sharedKeyRef.current) {
             receiverPipelineRef.current = new ReceiverPipeline(sharedKeyRef.current, msg.algo, async (blob, stats) => {
               
-              // ✅ DECOMPRESSION LOGIC
+              // DECOMPRESSION LOGIC
               let finalBlob = blob;
               let finalName = msg.name;
 
@@ -247,10 +247,9 @@ export const TransferRoom = () => {
         
         setQueueStatus(`Analyzing ${file.name}...`);
         
-        // ✅ CALL GENERIC COMPRESSOR (Images -> WebP, Docs -> Gzip)
+        // ✅ FIX: Use 'processFile' to get stats for ALL file types (syncs UI with Console)
         const { file: processedFile, meta } = await processFile(file);
         
-        // Check if user manually selected an algo (via the algos Map) or use AI recommendation
         const algoName = algos.get(file.name) || meta.algorithm;
         
         file = processedFile; 
@@ -359,7 +358,7 @@ export const TransferRoom = () => {
                 <div className="p-6">
                   <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2"><Signal className="w-4 h-4 text-blue-400" /> Find Peer</h2>
                   
-                  {/* ✅ NEW SEARCH UI */}
+                  {/* ✅ FIX: SEARCH UI IMPLEMENTED (Uses UserX and verifiedUser) */}
                   <div className="relative group">
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5" />
                     <input 
@@ -374,22 +373,30 @@ export const TransferRoom = () => {
                     )}
 
                     <AnimatePresence>
-                      {searchResult && (
+                      {searchQuery.length > 2 && !isSearching && (
                         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="absolute top-full left-0 right-0 mt-2 bg-[#1A202C] border border-gray-700 rounded-xl shadow-2xl z-50 overflow-hidden">
-                           <div className="p-3 flex items-center justify-between hover:bg-gray-800 cursor-pointer transition-colors" onClick={() => sendConnectionRequest(searchResult)}>
-                             <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center border border-green-500/30">
-                                   <UserCheck className="w-4 h-4" />
-                                </div>
-                                <div>
-                                   <span className="font-bold text-gray-200 block">{searchResult}</span>
-                                   <span className="text-[10px] text-green-400 font-mono flex items-center gap-1">
-                                      <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"/> ONLINE
-                                   </span>
-                                </div>
+                           {verifiedUser ? (
+                             // ✅ USER FOUND STATE
+                             <div className="p-3 flex items-center justify-between hover:bg-gray-800 cursor-pointer transition-colors" onClick={() => sendConnectionRequest(searchResult!)}>
+                               <div className="flex items-center gap-3">
+                                  <div className="w-8 h-8 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center border border-green-500/30">
+                                     <UserCheck className="w-4 h-4" />
+                                  </div>
+                                  <div>
+                                     <span className="font-bold text-gray-200 block">{verifiedUser.name}</span>
+                                     <span className="text-[10px] text-green-400 font-mono flex items-center gap-1">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"/> ONLINE
+                                     </span>
+                                  </div>
+                               </div>
+                               <button className="text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg shadow-lg">CONNECT</button>
                              </div>
-                             <button className="text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg shadow-lg">CONNECT</button>
-                           </div>
+                           ) : (
+                             // ✅ USER NOT FOUND STATE (Uses UserX)
+                             <div className="p-4 text-center text-gray-500 text-sm flex items-center justify-center gap-2">
+                                <UserX className="w-4 h-4" /> User not found
+                             </div>
+                           )}
                         </motion.div>
                       )}
                     </AnimatePresence>
