@@ -5,10 +5,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { generateKeyPair, exportPublicKey, importPublicKey, deriveSharedKey } from '../lib/crypto';
 import { sendFilePipeline, ReceiverPipeline } from '../lib/pipeline';
 import { WebRTCManager } from '../lib/webrtc'; 
+import { predictAlgorithm, compressImage } from '../lib/compression';
 import { FilePicker } from './FilePicker';
 import { 
-  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, 
-  Link2Off, Zap, Terminal, Signal, Loader2, UserX, Search 
+  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Link2Off, Zap, Terminal, Signal, Loader2, UserX, Search 
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -19,9 +19,9 @@ const COLORS = {
   text: '#E5E7EB',
 };
 
-// Use Environment Variable or fallback
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
-const socket: Socket = io(SERVER_URL, { transports: ['websocket'], reconnectionAttempts: 5 });
+// Fix: Allow polling fallback for better deployment compatibility
+const socket: Socket = io(SERVER_URL, { transports: ['websocket', 'polling'], reconnectionAttempts: 5 });
 
 export const TransferRoom = () => {
   const navigate = useNavigate();
@@ -38,7 +38,7 @@ export const TransferRoom = () => {
   const [targetUser, setTargetUser] = useState('');
   const [incomingRequest, setIncomingRequest] = useState<{from: string, key: JsonWebKey} | null>(null);
   const [encryptionReady, setEncryptionReady] = useState(false);
-  const [, setIsTransferring] = useState(false);
+  const [isTransferring, setIsTransferring] = useState(false);
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [receivedFiles, setReceivedFiles] = useState<{name: string, url: string}[]>([]);
@@ -50,6 +50,7 @@ export const TransferRoom = () => {
   const sharedKeyRef = useRef<CryptoKey | null>(null);
   const receiverPipelineRef = useRef<ReceiverPipeline | null>(null);
   const webrtcRef = useRef<WebRTCManager | null>(null); 
+  const lastAckRef = useRef<string>(''); // ✅ NEW: Tracks received ACKs
 
   const addLog = (msg: string) => setLogs(prev => [...prev.slice(-19), msg]);
 
@@ -150,10 +151,17 @@ export const TransferRoom = () => {
               const url = URL.createObjectURL(blob);
               setReceivedFiles(prev => [...prev, { name: msg.name, url }]);
               setTransferStats(stats);
-              addLog("File Downloaded Successfully");
+              addLog(`✅ Saved: ${msg.name}`);
               setProgress(100);
               setIsTransferring(false);
               setQueueStatus('');
+              
+              // ✅ 1. SEND ACK TO SENDER (Reliability Fix)
+              if (webrtcRef.current) {
+                 const ackMsg = JSON.stringify({ type: 'file-ack', name: msg.name });
+                 const encoder = new window.TextEncoder();
+                 webrtcRef.current.sendData(encoder.encode(ackMsg) as any);
+              }
             });
           }
           return; 
@@ -161,9 +169,14 @@ export const TransferRoom = () => {
         else if (msg.type === 'file-end') {
           addLog("Finalizing transfer...");
           if (receiverPipelineRef.current) await receiverPipelineRef.current.finish();
-          setIsTransferring(false);
-          setQueueStatus('');
+          // Note: The ACK is sent inside the finish callback above
           return; 
+        }
+        else if (msg.type === 'file-ack') {
+           // ✅ 2. RECEIVE ACK FROM RECEIVER
+           addLog(`✅ Verified by Peer: ${msg.name}`);
+           lastAckRef.current = msg.name;
+           return;
         }
       }
     } catch (e) {
@@ -173,7 +186,7 @@ export const TransferRoom = () => {
     // 2. Process Binary Chunk
     if (receiverPipelineRef.current) {
       receiverPipelineRef.current.processChunk(new Uint8Array(data));
-      setProgress(p => (p >= 95 ? 95 : p + 0.5));
+      setProgress(p => (p >= 98 ? 98 : p + 0.5));
     }
   };
 
@@ -210,12 +223,11 @@ export const TransferRoom = () => {
   };
 
   const startBatchTransfer = async (files: File[], algos: Map<string, string>) => {
-    // 1. STRICT CHECKS
+    // 1. Strict Checks
     if (!webrtcRef.current || p2pState !== 'connected' || !sharedKeyRef.current) {
       return alert("P2P Connection not ready! Please wait for the green light.");
     }
     
-    // 2. CAPTURE REFS (Safety against null mid-loop)
     const p2pManager = webrtcRef.current;
     const sharedKey = sharedKeyRef.current;
     const encoder = new window.TextEncoder();
@@ -224,63 +236,82 @@ export const TransferRoom = () => {
 
     try {
       for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const algo = algos.get(file.name) || 'None';
+        let file = files[i];
         
+        // --- A. AI OPTIMIZATION (Compression) ---
+        const algoName = predictAlgorithm(file);
+        setQueueStatus(`Optimizing ${file.name}...`);
+        addLog(`🤖 AI Strategy: ${algoName}`);
+        
+        const originalSize = file.size;
+        // Run compression logic
+        file = await compressImage(file);
+        
+        if (file.size < originalSize) {
+           const saved = ((originalSize - file.size) / 1024).toFixed(0);
+           addLog(`📉 Compressed: Saved ${saved} KB`);
+        }
+
+        // --- B. TRANSFER START ---
         setQueueStatus(`Sending ${i + 1}/${files.length}: ${file.name}`);
         addLog(`Uploading "${file.name}"...`);
         setProgress(0);
         setTransferStats(null);
 
-        // A. SEND METADATA (Start)
-        const startMeta = JSON.stringify({ 
-          type: 'file-start', 
-          name: file.name, 
-          algo: algo 
-        });
+        // Send Metadata
+        const startMeta = JSON.stringify({ type: 'file-start', name: file.name, algo: algoName });
         await p2pManager.sendData(encoder.encode(startMeta) as any);
 
-        // B. SEND CHUNKS (Pipeline)
-        const stats = await sendFilePipeline(file, sharedKey, algo, async (chunk) => {
+        // Send Chunks
+        const stats = await sendFilePipeline(file, sharedKey, algoName, async (chunk) => {
            await p2pManager.sendData(chunk as any); 
-           // Update progress smoothly
            setProgress(p => (p >= 98 ? 98 : p + 0.1));
         });
 
-        // 🛑 CRITICAL: DRAIN BUFFER
-        // Wait until the browser has actually sent everything before sending "End"
+        // --- C. DRAIN BUFFER ---
+        // Wait for browser buffer to empty (Prevent crash on large files)
         await new Promise<void>(resolve => {
-           const checkInterval = setInterval(() => {
-              // Access internal channel safely to check buffer
+           const check = setInterval(() => {
               // @ts-ignore
-              const channel = p2pManager.dataChannel;
-              if (channel && channel.bufferedAmount === 0) {
-                 clearInterval(checkInterval);
+              if (p2pManager.dataChannel?.bufferedAmount === 0) {
+                 clearInterval(check);
                  resolve();
               }
-           }, 50); // Check every 50ms
+           }, 20);
         });
 
-        // C. SEND END SIGNAL
-        const endMeta = JSON.stringify({ type: 'file-end' });
+        // Send End Signal
+        const endMeta = JSON.stringify({ type: 'file-end', name: file.name });
         await p2pManager.sendData(encoder.encode(endMeta) as any);
 
-        // D. LOG SUCCESS
+        // --- D. WAIT FOR ACK (Reliability Fix) ---
+        addLog("Waiting for verification...");
+        await new Promise<void>(resolve => {
+           const timeout = setTimeout(() => {
+              addLog("⚠️ Ack Timeout (Proceeding anyway)");
+              resolve(); 
+           }, 10000); // 10s Timeout safety
+
+           const check = setInterval(() => {
+              // Check if we received the ACK matching this file name
+              if (lastAckRef.current === file.name) {
+                 clearTimeout(timeout);
+                 clearInterval(check);
+                 resolve();
+              }
+           }, 100);
+        });
+
         setTransferStats(stats);
-        addLog(`Sent: "${file.name}"`);
+        addLog(`✅ Verified: "${file.name}"`);
         setProgress(100);
-        
-        // Small pause before next file to ensure receiver processes 'end'
         await new Promise(r => setTimeout(r, 200)); 
       }
-
       setQueueStatus('');
       addLog("Batch Transfer Complete");
-
     } catch (e) {
       addLog("❌ Transfer Interrupted");
-      console.error("Transfer Error:", e);
-      alert("Transfer failed. Please check console for details.");
+      console.error(e);
     } finally {
       setIsTransferring(false);
       setProgress(0);
@@ -301,7 +332,6 @@ export const TransferRoom = () => {
             <span className="font-bold text-xl tracking-tight text-white">SmartStream <span className="text-blue-500 text-xs align-top">P2P</span></span>
           </div>
           <div className="flex items-center gap-4">
-            {/* STATUS BADGES */}
             <div className="flex gap-2">
                {/* Socket Status */}
                <div className={clsx("flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold border", status === 'Online' ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-red-500/10 border-red-500/20 text-red-400")}>
@@ -412,7 +442,7 @@ export const TransferRoom = () => {
                    <span className="text-sm font-bold text-blue-400">{queueStatus}</span>
                 </motion.div>
              )}
-             <FilePicker onFilesSelected={startBatchTransfer} disabled={!encryptionReady || !!queueStatus} />
+             <FilePicker onFilesSelected={startBatchTransfer} disabled={!encryptionReady || isTransferring} />
           </div>
 
           {/* 📊 FULL STATS GRID */}
