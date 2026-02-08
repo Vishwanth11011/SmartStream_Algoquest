@@ -153,6 +153,7 @@ io.on('connection', (socket) => {
     
     // Broadcast list
     io.emit('user-online', { users: Array.from(usernameToSocket.keys()).map(u => ({ username: u })) });
+
   });
 
   // B. The Relay (Instant Lookup)
@@ -176,6 +177,26 @@ io.on('connection', (socket) => {
         ackCallback({ error: "User offline or not found." });
       }
     }
+  });
+
+  // ✅ D. NEW: User Check (Search Filter)
+  // This listens for the search bar input and returns status
+  socket.on('check-user', (targetUsername: string) => {
+    if (!targetUsername) return;
+    
+    const cleanTarget = targetUsername.trim().toLowerCase();
+    
+    // Check our active Map for the user
+    // We check if we have a socket ID for them
+    const isOnline = usernameToSocket.has(cleanTarget); 
+    
+    // Reply to the specific client who asked
+    socket.emit('user-status', { 
+      username: targetUsername, 
+      status: isOnline ? 'online' : 'offline' 
+    });
+    
+    console.log(`🔍 Search: ${cleanTarget} is ${isOnline ? 'Online' : 'Offline'}`);
   });
 
   // C. Disconnect

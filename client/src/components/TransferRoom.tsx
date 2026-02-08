@@ -5,21 +5,33 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { generateKeyPair, exportPublicKey, importPublicKey, deriveSharedKey } from '../lib/crypto';
 import { sendFilePipeline, ReceiverPipeline } from '../lib/pipeline';
 import { WebRTCManager } from '../lib/webrtc'; 
-import { compressImage } from '../lib/compression';
+import { processFile } from '../lib/compression'; // ✅ Using the new generic compressor
 import { FilePicker } from './FilePicker';
 import { 
-  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Link2Off, Zap, Terminal, Signal, Loader2, UserX, Search, ChevronDown 
+  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Link2Off, Zap, Terminal, Signal, Loader2, UserX, Search, ChevronDown, UserCheck 
 } from 'lucide-react';
 import clsx from 'clsx';
 
-// --- THEME PALETTE ---
+// --- THEME ---
 const COLORS = {
   bg: '#0B0F14',
   surface: '#121826',
   text: '#E5E7EB',
 };
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'https://smartstream-algoquest.onrender.com';
+// --- HELPER: Decompress Gzip (Browser Native) ---
+const decompressBlob = async (blob: Blob): Promise<Blob> => {
+  try {
+    const ds = new DecompressionStream('gzip');
+    const decompressedStream = blob.stream().pipeThrough(ds);
+    return await new Response(decompressedStream).blob();
+  } catch (error) {
+    console.warn("Decompression skipped (File might not be valid Gzip):", error);
+    return blob; // Return original if it fails
+  }
+};
+
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
 const socket: Socket = io(SERVER_URL, { transports: ['websocket', 'polling'], reconnectionAttempts: 5 });
 
 export const TransferRoom = () => {
@@ -28,14 +40,17 @@ export const TransferRoom = () => {
   // --- STATE ---
   const [username] = useState(localStorage.getItem('username') || '');
   const [status, setStatus] = useState('Connecting...');
-  
-  // P2P Status: 'disconnected' | 'connecting' | 'connected' | 'failed'
   const [p2pState, setP2pState] = useState<string>('disconnected'); 
   
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<string | null>(null);
   const [targetUser, setTargetUser] = useState('');
   const [incomingRequest, setIncomingRequest] = useState<{from: string, key: JsonWebKey} | null>(null);
+  
+  // New Search States
+  const [isSearching, setIsSearching] = useState(false);
+  const [verifiedUser, setVerifiedUser] = useState<{name: string, status: string} | null>(null);
+
   const [encryptionReady, setEncryptionReady] = useState(false);
   const [isTransferring, setIsTransferring] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -43,11 +58,8 @@ export const TransferRoom = () => {
   const [receivedFiles, setReceivedFiles] = useState<{name: string, url: string}[]>([]);
   const [transferStats, setTransferStats] = useState<any>(null);
   const [queueStatus, setQueueStatus] = useState(''); 
-  
-  // ✅ NEW: Store advanced compression stats (Entropy, Algorithm, etc.)
   const [advancedStats, setAdvancedStats] = useState<any>(null);
 
-  // --- REFS ---
   const keyPairRef = useRef<CryptoKeyPair | null>(null);
   const sharedKeyRef = useRef<CryptoKey | null>(null);
   const receiverPipelineRef = useRef<ReceiverPipeline | null>(null);
@@ -56,7 +68,7 @@ export const TransferRoom = () => {
 
   const addLog = (msg: string) => setLogs(prev => [...prev.slice(-19), msg]);
 
-  // --- 1. INITIALIZATION & SOCKET LISTENERS ---
+  // --- 1. INITIALIZATION ---
   useEffect(() => {
     if (!username) { navigate('/auth'); return; }
     const cleanName = username.trim().toLowerCase();
@@ -65,22 +77,30 @@ export const TransferRoom = () => {
     
     socket.emit('register-user', cleanName);
     setStatus('Online');
-    addLog(`Logged in as ${cleanName}`);
 
     socket.on('connect', () => { setStatus('Online'); socket.emit('register-user', cleanName); });
     socket.on('disconnect', () => { setStatus('Offline'); setP2pState('disconnected'); });
+
+    // ✅ Listen for User Check (Search Debounce Response)
+    socket.on('user-status', (data: any) => {
+      setIsSearching(false);
+      if (data.status === 'online') {
+        setSearchResult(data.username);
+        setVerifiedUser({ name: data.username, status: 'Online' });
+      } else {
+        setSearchResult(null);
+        setVerifiedUser(null);
+      }
+    });
 
     socket.on('file-relay', async (data: any) => {
       const { from, payload } = data;
       if (!from) return;
 
       if (['offer', 'answer', 'ice-candidate'].includes(payload.type)) {
-        if (webrtcRef.current) {
-          await webrtcRef.current.handleSignal(payload);
-        }
+        if (webrtcRef.current) await webrtcRef.current.handleSignal(payload);
         return;
       }
-
       if (payload.type === 'conn-request') {
         setIncomingRequest({ from, key: payload.key });
       }
@@ -95,35 +115,43 @@ export const TransferRoom = () => {
     });
 
     return () => { 
-      socket.off('connect'); 
-      socket.off('file-relay'); 
-      socket.off('disconnect'); 
+      socket.off('connect'); socket.off('file-relay'); socket.off('user-status'); socket.off('disconnect'); 
       webrtcRef.current?.close(); 
     };
   }, [username, navigate]);
 
-  // --- 2. WEBRTC SETUP HELPERS ---
+  // --- 2. SEARCH DEBOUNCE ---
+  useEffect(() => {
+    const delayDebounceFn = setTimeout(() => {
+      if (searchQuery.length > 2 && searchQuery !== username) {
+        setIsSearching(true);
+        socket.emit('check-user', searchQuery); // Ask server if user exists
+      } else {
+        setSearchResult(null);
+        setVerifiedUser(null);
+        setIsSearching(false);
+      }
+    }, 500); 
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [searchQuery, username]);
+
+
   const initializeWebRTC = async (target: string, isInitiator: boolean) => {
     setP2pState('connecting');
     setTargetUser(target);
     setSearchResult(null);
 
-    webrtcRef.current = new WebRTCManager(
-      socket,
-      target,
-      handleIncomingData, 
-      (status: string) => { 
+    webrtcRef.current = new WebRTCManager(socket, target, handleIncomingData, (status) => { 
         setP2pState(status);
         if (status === 'connected') {
           setEncryptionReady(true);
           addLog(`🚀 P2P Tunnel ESTABLISHED with ${target}`);
-        } else if (status === 'disconnected' || status === 'failed') {
+        } else if (status === 'disconnected') {
           setEncryptionReady(false);
           addLog(`⚠️ P2P Link Lost.`);
         }
-      }
-    );
-
+    });
     await webrtcRef.current.initConnection(isInitiator);
   };
 
@@ -140,11 +168,22 @@ export const TransferRoom = () => {
           setProgress(0);
           
           if (sharedKeyRef.current) {
-            receiverPipelineRef.current = new ReceiverPipeline(sharedKeyRef.current, msg.algo, (blob, stats) => {
-              const url = URL.createObjectURL(blob);
-              setReceivedFiles(prev => [...prev, { name: msg.name, url }]);
+            receiverPipelineRef.current = new ReceiverPipeline(sharedKeyRef.current, msg.algo, async (blob, stats) => {
+              
+              // ✅ DECOMPRESSION LOGIC
+              let finalBlob = blob;
+              let finalName = msg.name;
+
+              if (msg.algo && msg.algo.includes('GZIP')) {
+                 addLog(`📂 Decompressing...`);
+                 finalBlob = await decompressBlob(blob);
+                 if (finalName.endsWith('.gz')) finalName = finalName.slice(0, -3);
+              }
+
+              const url = URL.createObjectURL(finalBlob);
+              setReceivedFiles(prev => [...prev, { name: finalName, url }]);
               setTransferStats(stats);
-              addLog(`✅ Saved: ${msg.name}`);
+              addLog(`✅ Saved: ${finalName}`);
               setProgress(100);
               setIsTransferring(false);
               setQueueStatus('');
@@ -156,22 +195,16 @@ export const TransferRoom = () => {
               }
             });
           }
-          return; 
         } 
         else if (msg.type === 'file-end') {
-          addLog("Finalizing transfer...");
           if (receiverPipelineRef.current) await receiverPipelineRef.current.finish();
-          return; 
         }
         else if (msg.type === 'file-ack') {
-           addLog(`✅ Verified by Peer: ${msg.name}`);
            lastAckRef.current = msg.name;
-           return;
         }
+        return; 
       }
-    } catch (e) {
-      // Ignored
-    }
+    } catch (e) {}
 
     if (receiverPipelineRef.current) {
       receiverPipelineRef.current.processChunk(new Uint8Array(data));
@@ -179,7 +212,6 @@ export const TransferRoom = () => {
     }
   };
 
-  // --- 3. ACTIONS ---
   const sendConnectionRequest = async (target: string) => { 
     if(!keyPairRef.current) return; 
     const pubKey = await exportPublicKey(keyPairRef.current.publicKey); 
@@ -190,26 +222,17 @@ export const TransferRoom = () => {
   const acceptConnection = async () => { 
     if(!incomingRequest || !keyPairRef.current) return; 
     const target = incomingRequest.from; 
-    
-    try {
-      const foreignKey = await importPublicKey(incomingRequest.key); 
-      sharedKeyRef.current = await deriveSharedKey(keyPairRef.current.privateKey, foreignKey); 
-      
-      addLog(`Accepting ${target}...`);
-      await initializeWebRTC(target, false); 
-
-      const myPubKey = await exportPublicKey(keyPairRef.current.publicKey); 
-      socket.emit('file-relay', { targetUsername: target, payload: { type: 'conn-accept', key: myPubKey }}); 
-      setIncomingRequest(null); 
-    } catch (e) {
-      console.error(e);
-      addLog("Handshake Failed");
-    }
+    const foreignKey = await importPublicKey(incomingRequest.key); 
+    sharedKeyRef.current = await deriveSharedKey(keyPairRef.current.privateKey, foreignKey); 
+    await initializeWebRTC(target, false); 
+    const myPubKey = await exportPublicKey(keyPairRef.current.publicKey); 
+    socket.emit('file-relay', { targetUsername: target, payload: { type: 'conn-accept', key: myPubKey }}); 
+    setIncomingRequest(null); 
   };
 
   const startBatchTransfer = async (files: File[], algos: Map<string, string>) => {
     if (!webrtcRef.current || p2pState !== 'connected' || !sharedKeyRef.current) {
-      return alert("P2P Connection not ready! Please wait for the green light.");
+      return alert("P2P Connection not ready!");
     }
     
     const p2pManager = webrtcRef.current;
@@ -222,26 +245,24 @@ export const TransferRoom = () => {
       for (let i = 0; i < files.length; i++) {
         let file = files[i];
         
-        // --- A. AI OPTIMIZATION (With Tech Stats) ---
-        setQueueStatus(`Optimizing ${file.name}...`);
+        setQueueStatus(`Analyzing ${file.name}...`);
         
-        // ⚡️ Call the new compressor (Returns file + stats)
-        const { file: optimizedFile, meta } = await compressImage(file);
+        // ✅ CALL GENERIC COMPRESSOR (Images -> WebP, Docs -> Gzip)
+        const { file: processedFile, meta } = await processFile(file);
         
-        // 🛠 FIX: Use user selection OR the AI-detected algorithm
+        // Check if user manually selected an algo (via the algos Map) or use AI recommendation
         const algoName = algos.get(file.name) || meta.algorithm;
         
-        file = optimizedFile; 
-        setAdvancedStats(meta); // Update UI with Entropy, Time, etc.
+        file = processedFile; 
+        setAdvancedStats(meta);
         
         addLog(`🤖 Strategy: ${algoName}`);
         if (file.size < meta.originalSize) {
            addLog(`📉 Reduced by ${((meta.originalSize - file.size)/1024).toFixed(0)} KB`);
         }
 
-        // --- B. TRANSFER START ---
         setQueueStatus(`Sending ${i + 1}/${files.length}: ${file.name}`);
-        addLog(`Uploading "${file.name}"...`);
+        addLog(`Uploading...`);
         setProgress(0);
         setTransferStats(null);
 
@@ -253,34 +274,21 @@ export const TransferRoom = () => {
            setProgress(p => (p >= 98 ? 98 : p + 0.1));
         });
 
-        // --- C. DRAIN BUFFER ---
         await new Promise<void>(resolve => {
            const check = setInterval(() => {
               // @ts-ignore
-              if (p2pManager.dataChannel?.bufferedAmount === 0) {
-                 clearInterval(check);
-                 resolve();
-              }
+              if (p2pManager.dataChannel?.bufferedAmount === 0) { clearInterval(check); resolve(); }
            }, 20);
         });
 
         const endMeta = JSON.stringify({ type: 'file-end', name: file.name });
         await p2pManager.sendData(encoder.encode(endMeta) as any);
 
-        // --- D. WAIT FOR ACK ---
         addLog("Waiting for verification...");
         await new Promise<void>(resolve => {
-           const timeout = setTimeout(() => {
-              addLog("⚠️ Ack Timeout (Proceeding anyway)");
-              resolve(); 
-           }, 10000); 
-
+           const timeout = setTimeout(resolve, 10000); 
            const check = setInterval(() => {
-              if (lastAckRef.current === file.name) {
-                 clearTimeout(timeout);
-                 clearInterval(check);
-                 resolve();
-              }
+              if (lastAckRef.current === file.name) { clearTimeout(timeout); clearInterval(check); resolve(); }
            }, 100);
         });
 
@@ -304,7 +312,7 @@ export const TransferRoom = () => {
   return (
     <div className="min-h-screen font-sans selection:bg-blue-500/30" style={{ backgroundColor: COLORS.bg, color: COLORS.text }}>
       
-      {/* 1. TOP NAVIGATION */}
+      {/* NAVBAR */}
       <nav className="sticky top-0 z-50 border-b border-gray-800 backdrop-blur-md bg-[#0B0F14]/80">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -314,38 +322,23 @@ export const TransferRoom = () => {
             <span className="font-bold text-xl tracking-tight text-white">SmartStream <span className="text-blue-500 text-xs align-top">PRO</span></span>
           </div>
           <div className="flex items-center gap-4">
-            <div className="flex gap-2">
-               {/* Socket Status */}
-               <div className={clsx("flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold border", status === 'Online' ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-red-500/10 border-red-500/20 text-red-400")}>
-                 <div className={clsx("w-2 h-2 rounded-full", status === 'Online' ? "bg-green-400" : "bg-red-400")} />
-                 {status === 'Online' ? 'Signaling OK' : 'No Signal'}
-               </div>
-               
-               {/* P2P Status */}
-               {p2pState !== 'disconnected' && (
-                 <div className={clsx("flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold border transition-colors", 
-                   p2pState === 'connected' ? "bg-blue-500/10 border-blue-500/20 text-blue-400" : "bg-yellow-500/10 border-yellow-500/20 text-yellow-400")}>
-                   <Activity className={clsx("w-3 h-3", p2pState === 'connected' ? "animate-pulse" : "animate-spin")} />
-                   {p2pState === 'connected' ? 'P2P DIRECT' : 'NEGOTIATING...'}
-                 </div>
-               )}
-            </div>
-
-            <div className="h-6 w-px bg-gray-800 mx-2" />
-            <span className="text-sm font-medium text-gray-400 hidden sm:block">@{username}</span>
+             <div className={clsx("flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold border", status === 'Online' ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-red-500/10 border-red-500/20 text-red-400")}>
+               <div className={clsx("w-2 h-2 rounded-full", status === 'Online' ? "bg-green-400" : "bg-red-400")} />
+               {status === 'Online' ? 'Signaling OK' : 'No Signal'}
+             </div>
+             <span className="text-sm font-medium text-gray-400 hidden sm:block">@{username}</span>
           </div>
         </div>
       </nav>
 
       <div className="max-w-7xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
         
-        {/* 2. LEFT COLUMN */}
+        {/* LEFT COLUMN */}
         <div className="lg:col-span-8 space-y-6">
           
-          {/* SEARCH & CONNECTION CARD */}
+          {/* CONNECTION CARD */}
           <div className="rounded-2xl border border-gray-800 p-1 relative z-30" style={{ backgroundColor: COLORS.surface }}>
              {p2pState === 'connected' ? (
-                // ACTIVE CONNECTION
                 <div className="p-6 flex items-center justify-between bg-gradient-to-r from-blue-900/10 to-transparent">
                   <div className="flex items-center gap-4">
                     <div className="w-12 h-12 rounded-full bg-blue-500/20 flex items-center justify-center border border-blue-500/30">
@@ -355,53 +348,53 @@ export const TransferRoom = () => {
                       <h3 className="text-lg font-bold text-white flex items-center gap-2">
                         {targetUser} <span className="text-xs bg-blue-500 text-white px-2 py-0.5 rounded font-bold">P2P LINKED</span>
                       </h3>
-                      <p className="text-xs text-blue-400/80 font-mono mt-1">AES-256 • WEBRTC DATA CHANNEL • LOW LATENCY</p>
+                      <p className="text-xs text-blue-400/80 font-mono mt-1">AES-256 • WEBRTC DATA CHANNEL</p>
                     </div>
                   </div>
-                  <button onClick={() => { webrtcRef.current?.close(); setP2pState('disconnected'); setEncryptionReady(false); setTargetUser(''); addLog("Closed Connection"); }} className="group flex items-center gap-2 px-4 py-2 rounded-lg hover:bg-red-500/10 border border-transparent hover:border-red-500/30 transition-all">
-                    <span className="text-xs font-bold text-red-400 group-hover:text-red-300">DISCONNECT</span>
-                    <Link2Off className="w-4 h-4 text-red-500" />
+                  <button onClick={() => { webrtcRef.current?.close(); setP2pState('disconnected'); setEncryptionReady(false); setTargetUser(''); }} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs font-bold hover:bg-red-500/20">
+                    <Link2Off className="w-4 h-4" /> DISCONNECT
                   </button>
                 </div>
              ) : (
-                // SEARCH STATE
                 <div className="p-6">
-                  <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2">
-                    <Signal className="w-4 h-4 text-blue-400" /> Find Peer
-                  </h2>
+                  <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2"><Signal className="w-4 h-4 text-blue-400" /> Find Peer</h2>
+                  
+                  {/* ✅ NEW SEARCH UI */}
                   <div className="relative group">
-                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5 group-focus-within:text-blue-400 transition-colors" />
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5" />
                     <input 
-                      type="text" 
-                      placeholder="Search for username..." 
-                      className="w-full bg-[#0B0F14] border border-gray-700 rounded-xl py-4 pl-12 pr-4 text-white outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 transition-all placeholder:text-gray-600 font-medium"
+                      type="text" placeholder="Search username..." 
+                      className="w-full bg-[#0B0F14] border border-gray-700 rounded-xl py-4 pl-12 pr-4 text-white outline-none focus:border-blue-500/50 transition-all"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value.trim().toLowerCase())}
                     />
                     
+                    {isSearching && (
+                       <div className="absolute right-4 top-1/2 -translate-y-1/2"><Loader2 className="animate-spin w-4 h-4 text-blue-500" /></div>
+                    )}
+
                     <AnimatePresence>
-                      {searchQuery && (
-                        <motion.div 
-                          initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }}
-                          className="absolute top-full left-0 right-0 mt-2 bg-[#1A202C] border border-gray-700 rounded-xl shadow-2xl overflow-hidden z-50"
-                        >
-                          {searchResult || (searchQuery.length > 2) ? (
-                            <div className="p-3 flex items-center justify-between hover:bg-gray-800 transition-colors cursor-pointer" onClick={() => sendConnectionRequest(searchQuery)}>
-                              <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center text-xs font-bold text-white">
-                                  {searchQuery[0].toUpperCase()}
+                      {searchResult && (
+                        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="absolute top-full left-0 right-0 mt-2 bg-[#1A202C] border border-gray-700 rounded-xl shadow-2xl z-50 overflow-hidden">
+                           <div className="p-3 flex items-center justify-between hover:bg-gray-800 cursor-pointer transition-colors" onClick={() => sendConnectionRequest(searchResult)}>
+                             <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center border border-green-500/30">
+                                   <UserCheck className="w-4 h-4" />
                                 </div>
-                                <span className="font-bold text-gray-200">{searchQuery}</span>
-                              </div>
-                              <button className="text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded-lg transition-colors">CONNECT</button>
-                            </div>
-                          ) : (
-                             <div className="p-4 text-center text-gray-500 text-sm flex items-center justify-center gap-2"><UserX className="w-4 h-4" /> User not found</div>
-                          )}
+                                <div>
+                                   <span className="font-bold text-gray-200 block">{searchResult}</span>
+                                   <span className="text-[10px] text-green-400 font-mono flex items-center gap-1">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"/> ONLINE
+                                   </span>
+                                </div>
+                             </div>
+                             <button className="text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg shadow-lg">CONNECT</button>
+                           </div>
                         </motion.div>
                       )}
                     </AnimatePresence>
                   </div>
+
                 </div>
              )}
           </div>
@@ -416,10 +409,7 @@ export const TransferRoom = () => {
              )}
              
              {queueStatus && (
-                <motion.div 
-                  initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}
-                  className="mb-4 bg-blue-500/10 border border-blue-500/20 p-3 rounded-xl flex items-center justify-center gap-3"
-                >
+                <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-4 bg-blue-500/10 border border-blue-500/20 p-3 rounded-xl flex items-center justify-center gap-3">
                    <Loader2 className="animate-spin text-blue-400 w-4 h-4" />
                    <span className="text-sm font-bold text-blue-400">{queueStatus}</span>
                 </motion.div>
@@ -427,7 +417,7 @@ export const TransferRoom = () => {
              
              <FilePicker onFilesSelected={startBatchTransfer} disabled={!encryptionReady || isTransferring} />
 
-             {/* ✅ 🔍 HIDDEN TECH SPECS DROPDOWN */}
+             {/* TECH STATS DROPDOWN */}
              <AnimatePresence>
                {advancedStats && (
                  <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="mt-4">
@@ -469,52 +459,20 @@ export const TransferRoom = () => {
              </AnimatePresence>
           </div>
 
-          {/* 📊 FULL STATS GRID */}
+          {/* STATS GRID */}
           <AnimatePresence>
             {transferStats && (
               <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                
-                <StatCard 
-                  label="Original Size" 
-                  value={`${(transferStats.originalSize / 1024 / 1024).toFixed(2)} MB`} 
-                  icon={Layers} 
-                  color="text-gray-400" 
-                />
-
-                <StatCard 
-                  label="Bandwidth Used" 
-                  value={
-                    transferStats.finalSize < 1024 * 1024 
-                      ? `${(transferStats.finalSize / 1024).toFixed(2)} KB` 
-                      : `${(transferStats.finalSize / 1024 / 1024).toFixed(2)} MB`
-                  } 
-                  icon={Wifi} 
-                  color={transferStats.finalSize < transferStats.originalSize ? "text-blue-400" : "text-gray-400"} 
-                />
-
-                <StatCard 
-                  label="Compression" 
-                  value={(() => {
-                    if (!transferStats.originalSize) return '0%';
-                    const ratio = ((1 - (transferStats.finalSize / transferStats.originalSize)) * 100);
-                    return ratio > 0 ? `${ratio.toFixed(1)}%` : '0%';
-                  })()} 
-                  icon={Zap} 
-                  color={transferStats.finalSize < transferStats.originalSize ? "text-green-400" : "text-gray-500"} 
-                />
-
-                <StatCard 
-                  label="Transfer Speed" 
-                  value={`${transferStats.speed} MB/s`} 
-                  icon={Activity} 
-                  color="text-yellow-400" 
-                />
+                <StatCard label="Original Size" value={`${(transferStats.originalSize / 1024 / 1024).toFixed(2)} MB`} icon={Layers} color="text-gray-400" />
+                <StatCard label="Bandwidth Used" value={transferStats.finalSize < 1024 * 1024 ? `${(transferStats.finalSize / 1024).toFixed(2)} KB` : `${(transferStats.finalSize / 1024 / 1024).toFixed(2)} MB`} icon={Wifi} color={transferStats.finalSize < transferStats.originalSize ? "text-blue-400" : "text-gray-400"} />
+                <StatCard label="Compression" value={(() => { if (!transferStats.originalSize) return '0%'; const ratio = ((1 - (transferStats.finalSize / transferStats.originalSize)) * 100); return ratio > 0 ? `${ratio.toFixed(1)}%` : '0%'; })()} icon={Zap} color={transferStats.finalSize < transferStats.originalSize ? "text-green-400" : "text-gray-500"} />
+                <StatCard label="Transfer Speed" value={`${transferStats.speed} MB/s`} icon={Activity} color="text-yellow-400" />
               </motion.div>
             )}
           </AnimatePresence>
         </div>
 
-        {/* 3. RIGHT COLUMN (Logs & Files) */}
+        {/* RIGHT COLUMN */}
         <div className="lg:col-span-4 space-y-6 h-full flex flex-col z-10">
           
           {receivedFiles.length > 0 && (
@@ -543,7 +501,7 @@ export const TransferRoom = () => {
                {logs.map((log, i) => (
                  <motion.div key={i} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} className="flex gap-2">
                    <span className="text-blue-500/50">➜</span>
-                   <span className={clsx(log.includes('CRITICAL') || log.includes('Failed') ? "text-red-400" : log.includes('ESTABLISHED') || log.includes('Successfully') || log.includes('Verified') ? "text-green-400" : "text-gray-300")}>{log}</span>
+                   <span className={clsx(log.includes('CRITICAL') || log.includes('Failed') ? "text-red-400" : log.includes('ESTABLISHED') || log.includes('Verified') ? "text-green-400" : "text-gray-300")}>{log}</span>
                  </motion.div>
                ))}
                <div className="animate-pulse text-blue-500">_</div>
@@ -559,7 +517,7 @@ export const TransferRoom = () => {
              <div className="max-w-3xl mx-auto flex items-center gap-4">
                <span className="text-xs font-bold text-blue-400 animate-pulse">P2P TRANSFER...</span>
                <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
-                 <motion.div className="h-full bg-gradient-to-r from-blue-500 to-cyan-400" initial={{ width: 0 }} animate={{ width: `${progress}%` }} transition={{ ease: "linear" }} />
+                 <motion.div className="h-full bg-gradient-to-r from-blue-500 to-cyan-400" initial={{ width: 0 }} animate={{ width: `${progress}%` }} />
                </div>
                <span className="text-xs font-mono text-gray-400">{Math.round(progress)}%</span>
              </div>
@@ -572,7 +530,6 @@ export const TransferRoom = () => {
         {incomingRequest && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm">
              <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="bg-[#121826] border border-blue-500/30 p-8 rounded-2xl shadow-2xl max-w-sm w-full text-center relative overflow-hidden">
-                <div className="absolute inset-0 bg-blue-500/5 z-0" />
                 <Bell className="w-12 h-12 text-blue-400 mx-auto mb-4 animate-bounce relative z-10" />
                 <h3 className="text-xl font-bold text-white mb-2 relative z-10">Connection Request</h3>
                 <p className="text-gray-400 mb-8 relative z-10"><strong className="text-white">{incomingRequest.from}</strong> wants to open a direct P2P tunnel.</p>

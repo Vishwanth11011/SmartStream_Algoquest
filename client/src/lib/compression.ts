@@ -4,18 +4,17 @@ export interface CompressionMeta {
   algorithm: string;
   originalSize: number;
   compressedSize: number;
-  entropy: number; // Shannon Entropy (bits/byte)
+  entropy: number;
   timeTaken: number;
+  recommendation: string;
 }
 
-// 🧠 Shannon Entropy Calculation (Measures information density)
-const calculateEntropy = async (blob: Blob): Promise<number> => {
-  const arrayBuffer = await blob.arrayBuffer();
+// 🧠 Shannon Entropy Calculation (Remains the same for UI sync)
+const calculateEntropy = async (file: Blob): Promise<number> => {
+  const arrayBuffer = await file.arrayBuffer();
   const data = new Uint8Array(arrayBuffer);
   const frequencies = new Array(256).fill(0);
-  
   for (let i = 0; i < data.length; i++) frequencies[data[i]]++;
-  
   return frequencies.reduce((sum, count) => {
     if (count === 0) return sum;
     const p = count / data.length;
@@ -23,85 +22,79 @@ const calculateEntropy = async (blob: Blob): Promise<number> => {
   }, 0);
 };
 
-export const predictAlgorithm = (file: File): string => {
-  if (file.type.startsWith('image/')) return 'Smart WebP (Resized)';
-  return 'AES-256-GCM';
+// ⚡️ NEW: Generic Lossless Compression (Gzip)
+const compressGeneric = async (file: File): Promise<Blob> => {
+  const stream = file.stream().pipeThrough(new CompressionStream('gzip'));
+  return await new Response(stream).blob();
 };
 
-// Now returns both the File AND the Tech Stats
-export const compressImage = async (file: File): Promise<{ file: File; meta: CompressionMeta }> => {
+export const predictAlgorithm = (file: File, entropy: number): string => {
+  if (file.type.startsWith('image/')) return 'Smart WebP';
+  // If entropy is high (> 7.8), it's likely already compressed (ZIP/MP4)
+  if (entropy > 7.8) return 'AES-256 (Raw)';
+  // Low entropy files get Gzip
+  return 'GZIP (Lossless)';
+};
+
+export const processFile = async (file: File): Promise<{ file: File; meta: CompressionMeta }> => {
   const startTime = performance.now();
   const originalSize = file.size;
+  const entropy = await calculateEntropy(file);
+  const recommendation = predictAlgorithm(file, entropy);
 
-  // Default Meta (if no compression happens)
   let meta: CompressionMeta = {
-    algorithm: 'None (Raw Transfer)',
+    algorithm: recommendation,
     originalSize,
     compressedSize: originalSize,
-    entropy: 0,
-    timeTaken: 0
+    entropy,
+    timeTaken: 0,
+    recommendation
   };
 
-  if (!file.type.startsWith('image/')) return { file, meta };
-
-  return new Promise((resolve) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.src = url;
-
-    img.onload = async () => {
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      
-      // Smart Resizing Logic (Max 1920px)
-      const MAX_DIMENSION = 1920; 
-      let width = img.width;
-      let height = img.height;
-      let wasResized = false;
-
-      if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
-        wasResized = true;
-        const ratio = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height);
-        width *= ratio;
-        height *= ratio;
-      }
-
-      canvas.width = width;
-      canvas.height = height;
-      if (ctx) {
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, 0, 0, width, height);
-      }
-
-      // Convert to WebP
-      canvas.toBlob(async (blob) => {
-        URL.revokeObjectURL(url);
-        if (!blob) return resolve({ file, meta });
-
-        // Calculate real entropy of the new file
-        const entropy = await calculateEntropy(blob);
-        const timeTaken = Math.round(performance.now() - startTime);
-
-        if (blob.size < originalSize) {
-           const newName = file.name.substring(0, file.name.lastIndexOf('.')) + '.webp';
-           const newFile = new File([blob], newName, { type: 'image/webp', lastModified: Date.now() });
-           
-           meta = {
-             algorithm: wasResized ? 'Smart WebP + Lanczos Resizing' : 'WebP Lossless (VP8L)',
-             originalSize,
-             compressedSize: blob.size,
-             entropy, // e.g., 7.8 bits/byte (High density)
-             timeTaken
-           };
-           
-           resolve({ file: newFile, meta });
-        } else {
-           resolve({ file, meta });
+  // --- STRATEGY 1: Image Compression (Specialized) ---
+  if (file.type.startsWith('image/')) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.src = url;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const MAX_DIM = 1920;
+        let { width, height } = img;
+        if (width > MAX_DIM || height > MAX_DIM) {
+          const ratio = Math.min(MAX_DIM / width, MAX_DIM / height);
+          width *= ratio; height *= ratio;
         }
-      }, 'image/webp', 0.8);
-    };
+        canvas.width = width; canvas.height = height;
+        ctx?.drawImage(img, 0, 0, width, height);
+        canvas.toBlob(async (blob) => {
+          URL.revokeObjectURL(url);
+          if (blob && blob.size < originalSize) {
+            const newFile = new File([blob], file.name.replace(/\.[^/.]+$/, ".webp"), { type: 'image/webp' });
+            meta.compressedSize = blob.size;
+            meta.timeTaken = Math.round(performance.now() - startTime);
+            resolve({ file: newFile, meta });
+          } else resolve({ file, meta });
+        }, 'image/webp', 0.8);
+      };
+    });
+  }
 
-    img.onerror = () => resolve({ file, meta });
-  });
+  // --- STRATEGY 2: Generic Compression (For PDFs, Text, Code) ---
+  if (recommendation.includes('GZIP')) {
+    const compressedBlob = await compressGeneric(file);
+    if (compressedBlob.size < originalSize) {
+      meta.compressedSize = compressedBlob.size;
+      meta.algorithm = 'GZIP Lossless';
+      meta.timeTaken = Math.round(performance.now() - startTime);
+      // We append .gz to let the receiver know it's compressed
+      const compressedFile = new File([compressedBlob], `${file.name}.gz`, { type: 'application/gzip' });
+      return { file: compressedFile, meta };
+    }
+  }
+
+  // --- STRATEGY 3: High Entropy (Skip) ---
+  meta.timeTaken = Math.round(performance.now() - startTime);
+  return { file, meta };
 };
