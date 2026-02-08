@@ -239,7 +239,7 @@ export const TransferRoom = () => {
         let file = files[i];
         
         // --- A. AI OPTIMIZATION (Compression) ---
-        const algoName = predictAlgorithm(file);
+        const algoName = algos.get(file.name) || predictAlgorithm(file);
         setQueueStatus(`Optimizing ${file.name}...`);
         addLog(`🤖 AI Strategy: ${algoName}`);
         
