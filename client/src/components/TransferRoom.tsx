@@ -31,7 +31,7 @@ const decompressBlob = async (blob: Blob): Promise<Blob> => {
   }
 };
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'https://smartstream-algoquest.onrender.com';
 const socket: Socket = io(SERVER_URL, { transports: ['websocket', 'polling'], reconnectionAttempts: 5 });
 
 export const TransferRoom = () => {
