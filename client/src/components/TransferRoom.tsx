@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { generateKeyPair, exportPublicKey, importPublicKey, deriveSharedKey } from '../lib/crypto';
 import { sendFilePipeline, ReceiverPipeline } from '../lib/pipeline';
 import { WebRTCManager } from '../lib/webrtc'; 
-import { compressImage } from '../lib/compression'; // ✅ Updated import
+import { compressImage } from '../lib/compression';
 import { FilePicker } from './FilePicker';
 import { 
   Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Link2Off, Zap, Terminal, Signal, Loader2, UserX, Search, ChevronDown 
@@ -40,8 +40,6 @@ export const TransferRoom = () => {
   const [receivedFiles, setReceivedFiles] = useState<{name: string, url: string}[]>([]);
   const [transferStats, setTransferStats] = useState<any>(null);
   const [queueStatus, setQueueStatus] = useState(''); 
-  
-  // ✅ NEW: Store advanced compression stats (Entropy, Algorithm, etc.)
   const [advancedStats, setAdvancedStats] = useState<any>(null);
 
   // --- REFS ---
@@ -126,6 +124,7 @@ export const TransferRoom = () => {
           if (sharedKeyRef.current) {
             receiverPipelineRef.current = new ReceiverPipeline(sharedKeyRef.current, msg.algo, (blob, stats) => {
               const url = URL.createObjectURL(blob);
+              // ✅ USAGE FIX: This updates receivedFiles state
               setReceivedFiles(prev => [...prev, { name: msg.name, url }]);
               setTransferStats(stats);
               addLog(`✅ Saved: ${msg.name}`);
@@ -133,7 +132,6 @@ export const TransferRoom = () => {
               setIsTransferring(false);
               setQueueStatus('');
               
-              // Send ACK
               if (webrtcRef.current) {
                  const ackMsg = JSON.stringify({ type: 'file-ack', name: msg.name });
                  const encoder = new window.TextEncoder();
@@ -192,24 +190,19 @@ export const TransferRoom = () => {
       for (let i = 0; i < files.length; i++) {
         let file = files[i];
         
-        // --- A. AI OPTIMIZATION (Now with Tech Stats) ---
         setQueueStatus(`Optimizing ${file.name}...`);
         
-        // ⚡️ Call the new compressor (Returns file + stats)
         const { file: optimizedFile, meta } = await compressImage(file);
-        
-        // 🛠 FIX: Use user selection OR the AI-detected algorithm
         const algoName = algos.get(file.name) || meta.algorithm;
         
         file = optimizedFile; 
-        setAdvancedStats(meta); // Update UI with Entropy, Time, etc.
+        setAdvancedStats(meta);
         
         addLog(`🤖 Strategy: ${algoName}`);
         if (file.size < meta.originalSize) {
            addLog(`📉 Reduced by ${((meta.originalSize - file.size)/1024).toFixed(0)} KB`);
         }
 
-        // --- B. TRANSFER ---
         setQueueStatus(`Sending ${i + 1}/${files.length}: ${file.name}`);
         addLog(`Uploading...`);
         setProgress(0);
@@ -223,8 +216,6 @@ export const TransferRoom = () => {
            setProgress(p => (p >= 98 ? 98 : p + 0.1));
         });
 
-        // --- C. RELIABILITY ---
-        // 1. Drain Buffer
         await new Promise<void>(resolve => {
            const check = setInterval(() => {
               // @ts-ignore
@@ -232,11 +223,9 @@ export const TransferRoom = () => {
            }, 20);
         });
 
-        // 2. Send End
         const endMeta = JSON.stringify({ type: 'file-end', name: file.name });
         await p2pManager.sendData(encoder.encode(endMeta) as any);
 
-        // 3. Wait for ACK
         addLog("Waiting for verification...");
         await new Promise<void>(resolve => {
            const timeout = setTimeout(resolve, 10000); 
@@ -275,7 +264,6 @@ export const TransferRoom = () => {
             <span className="font-bold text-xl tracking-tight text-white">SmartStream <span className="text-blue-500 text-xs align-top">PRO</span></span>
           </div>
           <div className="flex items-center gap-4">
-             {/* Status Badge */}
              <div className={clsx("flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold border", status === 'Online' ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-red-500/10 border-red-500/20 text-red-400")}>
                <div className={clsx("w-2 h-2 rounded-full", status === 'Online' ? "bg-green-400" : "bg-red-400")} />
                {status === 'Online' ? 'Signaling OK' : 'No Signal'}
@@ -305,7 +293,13 @@ export const TransferRoom = () => {
                       <p className="text-xs text-blue-400/80 font-mono mt-1">AES-256 • WEBRTC DATA CHANNEL</p>
                     </div>
                   </div>
-                  <button onClick={() => { webrtcRef.current?.close(); setP2pState('disconnected'); setEncryptionReady(false); setTargetUser(''); }} className="px-4 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs font-bold hover:bg-red-500/20">DISCONNECT</button>
+                  {/* ✅ USAGE FIX: Link2Off is now used here */}
+                  <button 
+                    onClick={() => { webrtcRef.current?.close(); setP2pState('disconnected'); setEncryptionReady(false); setTargetUser(''); }} 
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs font-bold hover:bg-red-500/20"
+                  >
+                    <Link2Off className="w-4 h-4" /> DISCONNECT
+                  </button>
                 </div>
              ) : (
                 <div className="p-6">
@@ -326,7 +320,12 @@ export const TransferRoom = () => {
                               <span className="font-bold text-gray-200 ml-2">{searchQuery}</span>
                               <button className="text-xs font-bold bg-blue-600 text-white px-3 py-1.5 rounded-lg">CONNECT</button>
                             </div>
-                          ) : ( <div className="p-4 text-center text-gray-500 text-sm">User not found</div> )}
+                          ) : ( 
+                            // ✅ USAGE FIX: UserX is now used here
+                            <div className="p-4 text-center text-gray-500 text-sm flex items-center justify-center gap-2">
+                                <UserX className="w-4 h-4" /> User not found
+                            </div> 
+                          )}
                         </motion.div>
                       )}
                     </AnimatePresence>
@@ -337,6 +336,14 @@ export const TransferRoom = () => {
 
           {/* FILE PICKER & TECH STATS */}
           <div className="relative z-10">
+             {/* ✅ USAGE FIX: Lock is now used here */}
+             {!encryptionReady && (
+               <div className="absolute inset-0 z-10 bg-[#0B0F14]/60 backdrop-blur-sm flex flex-col items-center justify-center rounded-2xl border border-gray-800/50">
+                 <Lock className="w-10 h-10 text-gray-600 mb-2" />
+                 <p className="text-gray-400 font-medium">Connect to a peer to start transferring</p>
+               </div>
+             )}
+
              {queueStatus && (
                 <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-4 bg-blue-500/10 border border-blue-500/20 p-3 rounded-xl flex items-center justify-center gap-3">
                    <Loader2 className="animate-spin text-blue-400 w-4 h-4" />
@@ -413,8 +420,34 @@ export const TransferRoom = () => {
           </AnimatePresence>
         </div>
 
-        {/* RIGHT COLUMN (Logs) */}
+        {/* RIGHT COLUMN (Logs & Received Files) */}
         <div className="lg:col-span-4 space-y-6 h-full flex flex-col z-10">
+          
+          {/* ✅ USAGE FIX: This section uses 'receivedFiles' and 'Download' */}
+          {receivedFiles.length > 0 && (
+             <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="bg-[#121826] border border-gray-800 rounded-2xl p-5">
+                <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+                   <Download className="w-4 h-4 text-green-500" /> Received Files
+                </h3>
+                <div className="space-y-3 max-h-60 overflow-y-auto custom-scrollbar">
+                  {receivedFiles.map((f, i) => (
+                    <div key={i} className="group flex items-center justify-between p-3 bg-[#0B0F14] rounded-xl border border-gray-800 hover:border-gray-700 transition-colors">
+                      <div className="flex items-center gap-3 overflow-hidden">
+                        <div className="w-8 h-8 rounded-lg bg-gray-800 flex items-center justify-center text-xs font-bold text-gray-400 group-hover:text-white transition-colors">
+                            {f.name.split('.').pop()?.toUpperCase()}
+                        </div>
+                        <span className="text-sm text-gray-300 truncate font-medium">{f.name}</span>
+                      </div>
+                      <a href={f.url} download={f.name} className="p-2 hover:bg-gray-800 rounded-lg text-gray-500 hover:text-green-400 transition-colors">
+                         <Download className="w-4 h-4" />
+                      </a>
+                    </div>
+                  ))}
+                </div>
+             </motion.div>
+          )}
+
+          {/* LOGS */}
           <div className="flex-1 bg-black rounded-2xl border border-gray-800 p-1 flex flex-col min-h-[400px]">
             <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between bg-gray-900/50 rounded-t-xl">
                <div className="flex items-center gap-2"><Terminal className="w-4 h-4 text-blue-500" /><span className="text-xs font-bold text-gray-400">SYSTEM OUTPUT</span></div>
