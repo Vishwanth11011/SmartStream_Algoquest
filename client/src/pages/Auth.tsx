@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 // Ensure these functions are exported from your lib/auth file
 import { loginUser, registerUser, fetchSecurityQuestion, resetPassword } from '../lib/auth';
-import { Lock, User, Mail, ShieldCheck, Zap, Minimize2, ArrowRight, ShieldQuestion, ArrowLeft, KeyRound } from 'lucide-react';
+import { Lock, User, Mail, ShieldCheck, Zap, ArrowRight, ShieldQuestion, ArrowLeft, KeyRound } from 'lucide-react';
 
 const COLORS = {
   bg: '#0B0F14',
