@@ -6,7 +6,7 @@ import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
-import { User } from './models/User'; // Ensure this model exists
+import { User } from './models/User'; 
 
 // 1. CONFIGURATION
 dotenv.config();
@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '10mb' })); // Higher limit for AI metadata
+app.use(express.json({ limit: '10mb' })); 
 
 // 2. DATABASE CONNECTION (MongoDB Atlas)
 const connectDB = async () => {
@@ -34,37 +34,24 @@ connectDB();
 
 // 3. AUTHENTICATION ROUTES
 
-// Register
+// A. Register
 app.post('/api/auth/register', async (req, res): Promise<any> => {
   try {
     const { username, email, password, fullName, securityQuestion, securityAnswer } = req.body;
     
-    // --- 🛡️ SECURITY VALIDATION START ---
-
-    // 1. Validate Email Format
+    // Validate Email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({ error: "Invalid email format." });
-    }
+    if (!emailRegex.test(email)) return res.status(400).json({ error: "Invalid email format." });
 
-    // 2. Validate Password (Min 8 chars, Alphanumeric)
-    if (!password || password.length < 8) {
-      return res.status(400).json({ error: "Password must be at least 8 characters long." });
-    }
-    const hasLetter = /[a-zA-Z]/.test(password);
-    const hasNumber = /\d/.test(password);
-    if (!hasLetter || !hasNumber) {
-      return res.status(400).json({ error: "Password must contain both letters and numbers." });
-    }
+    // Validate Password
+    if (!password || password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
+    if (!/[a-zA-Z]/.test(password) || !/\d/.test(password)) return res.status(400).json({ error: "Password must contain letters and numbers." });
 
-    // --- 🛡️ SECURITY VALIDATION END ---
-
-    // Normalize Username
     const cleanUsername = username.trim().toLowerCase();
-
     const existing = await User.findOne({ $or: [{ email }, { username: cleanUsername }] });
     if (existing) return res.status(400).json({ error: "Username or Email already taken" });
 
+    // Hash Password & Security Answer
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
     const hashedAnswer = await bcrypt.hash(securityAnswer.toLowerCase(), salt);
@@ -87,7 +74,7 @@ app.post('/api/auth/register', async (req, res): Promise<any> => {
   }
 });
 
-// Login
+// B. Login
 app.post('/api/auth/login', async (req, res): Promise<any> => {
   try {
     const { username, password } = req.body;
@@ -112,24 +99,69 @@ app.post('/api/auth/login', async (req, res): Promise<any> => {
   }
 });
 
-// 4. AI LOGGING (Metadata only)
+// ✅ C. Get Security Question (NEW - Fixes 'Action Failed')
+app.get('/api/auth/security-question/:username', async (req, res): Promise<any> => {
+  try {
+    const { username } = req.params;
+    const cleanUsername = username.trim().toLowerCase();
+
+    const user = await User.findOne({ username: cleanUsername });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Return the question only
+    res.json({ question: user.securityQuestion });
+  } catch (error) {
+    console.error("Fetch Question Error:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ✅ D. Reset Password (NEW - Fixes 'Action Failed')
+app.post('/api/auth/reset-password', async (req, res): Promise<any> => {
+  try {
+    const { username, securityAnswer, newPassword } = req.body;
+    const cleanUsername = username.trim().toLowerCase();
+
+    const user = await User.findOne({ username: cleanUsername });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Verify Answer (Compare with stored hash)
+    const isAnswerValid = await bcrypt.compare(securityAnswer.toLowerCase(), user.securityAnswer);
+    if (!isAnswerValid) return res.status(400).json({ message: "Incorrect security answer" });
+
+    // Hash New Password
+    const salt = await bcrypt.genSalt(10);
+    const newHashedPassword = await bcrypt.hash(newPassword, salt);
+
+    // Update User
+    user.password = newHashedPassword;
+    await user.save();
+
+    console.log(`🔐 Password Reset for: ${cleanUsername}`);
+    res.json({ message: "Password reset successful" });
+  } catch (error) {
+    console.error("Reset Error:", error);
+    res.status(500).json({ error: "Reset failed" });
+  }
+});
+
+// 4. AI LOGGING
 app.post('/api/ai/analyze', (req, res) => {
   const { filename, size, algo, vector } = req.body;
   console.log(`🧠 AI Analysis | File: ${filename} | Algo: ${algo}`);
   res.json({ status: "Verified" });
 });
 
-// 5. SOCKET.IO SERVER (The Relay)
+// 5. SOCKET.IO SERVER
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: "*" },
   maxHttpBufferSize: 1e8 
 });
 
-// 🔴 CRITICAL FIX: DUAL MAP SYSTEM TO PREVENT "GHOST USERS"
-// This ensures every username maps to ONLY ONE active socket ID.
-const usernameToSocket = new Map<string, string>(); // Access by Username (O(1))
-const socketToUsername = new Map<string, string>(); // Access by SocketID (O(1))
+// Dual Map System for O(1) Access
+const usernameToSocket = new Map<string, string>(); 
+const socketToUsername = new Map<string, string>(); 
 
 io.on('connection', (socket) => {
   console.log(`🔌 New Connection: ${socket.id}`);
@@ -137,66 +169,43 @@ io.on('connection', (socket) => {
   // A. Register User
   socket.on('register-user', (rawUsername: string) => {
     const username = rawUsername.trim().toLowerCase();
-
-    // 1. Kick out old socket if user is already logged in (Fixes Refresh Bug)
     const oldSocketId = usernameToSocket.get(username);
     if (oldSocketId && oldSocketId !== socket.id) {
-       // Optional: io.to(oldSocketId).emit('force_logout');
        socketToUsername.delete(oldSocketId);
     }
-
-    // 2. Register New Socket
     usernameToSocket.set(username, socket.id);
     socketToUsername.set(socket.id, username);
     
     console.log(`✅ Registered: ${username} -> ${socket.id}`);
-    
-    // Broadcast list
     io.emit('user-online', { users: Array.from(usernameToSocket.keys()).map(u => ({ username: u })) });
-
   });
 
-  // B. The Relay (Instant Lookup)
+  // B. The Relay
   socket.on('file-relay', (data, ackCallback) => { 
     const { targetUsername, payload } = data;
     const cleanTarget = targetUsername.trim().toLowerCase();
-    
-    // ⚡ O(1) LOOKUP (No more looping through entries!)
     const targetSocketId = usernameToSocket.get(cleanTarget);
     
     if (targetSocketId) {
       const senderName = socketToUsername.get(socket.id);
-
-      // Forward to Receiver
       io.to(targetSocketId).emit('file-relay', { from: senderName, payload }, (responseFromReceiver: any) => {
         if (ackCallback) ackCallback(responseFromReceiver); 
       });
     } else {
-      console.warn(`⚠️ Relay Failed: '${cleanTarget}' not found/offline.`);
-      if (ackCallback) {
-        ackCallback({ error: "User offline or not found." });
-      }
+      if (ackCallback) ackCallback({ error: "User offline or not found." });
     }
   });
 
-  // ✅ D. NEW: User Check (Search Filter)
-  // This listens for the search bar input and returns status
+  // ✅ D. User Check (Search Filter)
   socket.on('check-user', (targetUsername: string) => {
     if (!targetUsername) return;
-    
     const cleanTarget = targetUsername.trim().toLowerCase();
-    
-    // Check our active Map for the user
-    // We check if we have a socket ID for them
     const isOnline = usernameToSocket.has(cleanTarget); 
     
-    // Reply to the specific client who asked
     socket.emit('user-status', { 
       username: targetUsername, 
       status: isOnline ? 'online' : 'offline' 
     });
-    
-    console.log(`🔍 Search: ${cleanTarget} is ${isOnline ? 'Online' : 'Offline'}`);
   });
 
   // C. Disconnect
@@ -206,16 +215,13 @@ io.on('connection', (socket) => {
       console.log(`❌ Disconnected: ${username}`);
       usernameToSocket.delete(username);
       socketToUsername.delete(socket.id);
-      
-      // Update everyone else's list
       io.emit('user-online', { users: Array.from(usernameToSocket.keys()).map(u => ({ username: u })) });
     }
   });
 });
 
-// API for User Polling (Watchdog)
+// API for User Polling
 app.get('/api/users', (req, res) => {
-  // Convert Set/Map keys to array of objects
   const users = Array.from(usernameToSocket.keys()).map(u => ({ username: u }));
   res.json({ users });
 });

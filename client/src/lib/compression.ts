@@ -9,12 +9,20 @@ export interface CompressionMeta {
   recommendation: string;
 }
 
-// 🧠 Shannon Entropy Calculation (Remains the same for UI sync)
-const calculateEntropy = async (file: Blob): Promise<number> => {
-  const arrayBuffer = await file.arrayBuffer();
+/**
+   Shannon Entropy Calculator
+ * Measures information density (0.0 - 8.0 bits/byte).
+ */
+const calculateEntropy = async (file: File): Promise<number> => {
+  // Optimization: For large files (>50MB), only sample the first 2MB for speed.
+  const SAMPLE_SIZE = 2 * 1024 * 1024;
+  const slice = file.slice(0, Math.min(file.size, SAMPLE_SIZE));
+  const arrayBuffer = await slice.arrayBuffer();
   const data = new Uint8Array(arrayBuffer);
+  
   const frequencies = new Array(256).fill(0);
   for (let i = 0; i < data.length; i++) frequencies[data[i]]++;
+  
   return frequencies.reduce((sum, count) => {
     if (count === 0) return sum;
     const p = count / data.length;
@@ -22,37 +30,89 @@ const calculateEntropy = async (file: Blob): Promise<number> => {
   }, 0);
 };
 
-// ⚡️ NEW: Generic Lossless Compression (Gzip)
-const compressGeneric = async (file: File): Promise<Blob> => {
-  const stream = file.stream().pipeThrough(new CompressionStream('gzip'));
+/**
+  NATIVE COMPRESSOR
+ */
+const compressStream = async (file: File | Blob, format: 'gzip' | 'deflate'): Promise<Blob> => {
+  const stream = file.stream().pipeThrough(new CompressionStream(format));
   return await new Response(stream).blob();
 };
 
-export const predictAlgorithm = (file: File, entropy: number): string => {
-  if (file.type.startsWith('image/')) return 'Smart WebP';
-  // If entropy is high (> 7.8), it's likely already compressed (ZIP/MP4)
-  if (entropy > 7.8) return 'AES-256 (Raw)';
-  // Low entropy files get Gzip
-  return 'GZIP (Lossless)';
+/**
+  Takes a sample of a large file, tries to compress it, 
+ * and decides if the CPU cost is worth the bandwidth savings.
+ */
+const performCompressionProbe = async (file: File): Promise<boolean> => {
+  const PROBE_SIZE = 2 * 1024 * 1024; // 2MB Probe
+  if (file.size < PROBE_SIZE) return true; // Small files always try
+
+  const chunk = file.slice(0, PROBE_SIZE);
+  const compressedChunk = await compressStream(chunk, 'gzip');
+  
+  const savings = 1 - (compressedChunk.size / chunk.size);
+  // If we save more than 5%, it's worth compressing the whole stream
+  return savings > 0.05; 
 };
 
+/**
+ DECISION ENGINE
+ */
+export const predictAlgorithm = (file: File, entropy: number): string => {
+  // 1. IMAGE ANALYSIS (Visual Perception)
+  if (file.type.startsWith('image/')) {
+    if (['image/png', 'image/jpeg', 'image/jpg', 'image/webp'].includes(file.type)) return 'Smart WebP (CV)';
+    return 'None (Raw)'; 
+  }
+
+  // 2. AUDIO ANALYSIS (Waveform Redundancy)
+  // WAV/AIFF are huge but highly compressible (~30-50% savings)
+  if (file.type === 'audio/wav' || file.type === 'audio/x-aiff' || file.name.endsWith('.wav')) {
+    return 'Gzip (Audio)';
+  }
+
+  // 3. TEXT & CODE (Statistical Redundancy)
+  if (
+    file.type.includes('text') || 
+    file.type.includes('json') || 
+    file.type.includes('javascript') || 
+    file.type.includes('xml') ||
+    file.name.endsWith('.md') || 
+    file.name.endsWith('.log')
+  ) {
+    return 'Brotli (Dense)';
+  }
+
+  // 4. HIGH ENTROPY / LARGE FILES (Adaptive)
+  if (entropy > 7.5 || file.size > 50 * 1024 * 1024) {
+    return 'Adaptive Probe (Analyzing...)'; // Logic handled in processFile
+  }
+
+  // 5. DEFAULT
+  return 'Gzip (Universal)';
+};
+
+/**
+ COMPRESSION PIPELINE
+ */
 export const processFile = async (file: File): Promise<{ file: File; meta: CompressionMeta }> => {
   const startTime = performance.now();
   const originalSize = file.size;
+  
+  // 1. Analyze "DNA"
   const entropy = await calculateEntropy(file);
-  const recommendation = predictAlgorithm(file, entropy);
+  let strategy = predictAlgorithm(file, entropy);
 
   let meta: CompressionMeta = {
-    algorithm: recommendation,
+    algorithm: strategy,
     originalSize,
     compressedSize: originalSize,
     entropy,
     timeTaken: 0,
-    recommendation
+    recommendation: strategy
   };
 
-  // --- STRATEGY 1: Image Compression (Specialized) ---
-  if (file.type.startsWith('image/')) {
+  // --- BRANCH 1: SMART IMAGE RESAMPLING (Computer Vision) ---
+  if (strategy.includes('Smart WebP')) {
     return new Promise((resolve) => {
       const img = new Image();
       const url = URL.createObjectURL(file);
@@ -60,41 +120,80 @@ export const processFile = async (file: File): Promise<{ file: File; meta: Compr
       img.onload = () => {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
-        const MAX_DIM = 1920;
+        const MAX_DIM = 1920; 
         let { width, height } = img;
+
         if (width > MAX_DIM || height > MAX_DIM) {
           const ratio = Math.min(MAX_DIM / width, MAX_DIM / height);
           width *= ratio; height *= ratio;
         }
+
         canvas.width = width; canvas.height = height;
         ctx?.drawImage(img, 0, 0, width, height);
+        
         canvas.toBlob(async (blob) => {
           URL.revokeObjectURL(url);
           if (blob && blob.size < originalSize) {
-            const newFile = new File([blob], file.name.replace(/\.[^/.]+$/, ".webp"), { type: 'image/webp' });
+            const newName = file.name.replace(/\.[^/.]+$/, ".webp");
+            const newFile = new File([blob], newName, { type: 'image/webp' });
+            
             meta.compressedSize = blob.size;
             meta.timeTaken = Math.round(performance.now() - startTime);
+            meta.algorithm = 'Smart WebP (Optimized)';
+            
             resolve({ file: newFile, meta });
-          } else resolve({ file, meta });
-        }, 'image/webp', 0.8);
+          } else {
+            resolve({ file, meta });
+          }
+        }, 'image/webp', 0.80);
       };
+      img.onerror = () => resolve({ file, meta });
     });
   }
 
-  // --- STRATEGY 2: Generic Compression (For PDFs, Text, Code) ---
-  if (recommendation.includes('GZIP')) {
-    const compressedBlob = await compressGeneric(file);
-    if (compressedBlob.size < originalSize) {
-      meta.compressedSize = compressedBlob.size;
-      meta.algorithm = 'GZIP Lossless';
-      meta.timeTaken = Math.round(performance.now() - startTime);
-      // We append .gz to let the receiver know it's compressed
-      const compressedFile = new File([compressedBlob], `${file.name}.gz`, { type: 'application/gzip' });
-      return { file: compressedFile, meta };
+  // --- BRANCH 2: TEXT (Brotli) ---
+  if (strategy.includes('Brotli')) {
+    try {
+      const compressedBlob = await compressStream(file, 'deflate'); 
+      if (compressedBlob.size < originalSize) {
+        meta.compressedSize = compressedBlob.size;
+        meta.timeTaken = Math.round(performance.now() - startTime);
+        meta.algorithm = 'Brotli (Text)';
+        const newFile = new File([compressedBlob], file.name + '.br', { type: 'application/x-brotli' });
+        return { file: newFile, meta };
+      }
+    } catch (e) { console.warn("Brotli skipped", e); }
+  }
+
+  // --- BRANCH 3: ADAPTIVE PROBE (The Smart Check) ---
+  if (strategy.includes('Adaptive') || strategy.includes('Gzip')) {
+    let shouldUseGzip = true;
+
+    // If it's the "Adaptive" branch, we run the PROBE first
+    if (strategy.includes('Adaptive')) {
+      const isWorthIt = await performCompressionProbe(file);
+      if (!isWorthIt) {
+        shouldUseGzip = false;
+        meta.algorithm = 'Direct Stream (Raw)'; // Update meta to reflect decision
+      } else {
+        meta.algorithm = 'Gzip (Adaptive)';
+      }
+    }
+
+    if (shouldUseGzip) {
+      try {
+        const compressedBlob = await compressStream(file, 'gzip');
+        if (compressedBlob.size < originalSize) {
+          meta.compressedSize = compressedBlob.size;
+          meta.timeTaken = Math.round(performance.now() - startTime);
+          const newFile = new File([compressedBlob], file.name + '.gz', { type: 'application/gzip' });
+          return { file: newFile, meta };
+        }
+      } catch (e) { console.warn("Gzip skipped", e); }
     }
   }
 
-  // --- STRATEGY 3: High Entropy (Skip) ---
+  // --- BRANCH 4: RAW ---
   meta.timeTaken = Math.round(performance.now() - startTime);
   return { file, meta };
 };
