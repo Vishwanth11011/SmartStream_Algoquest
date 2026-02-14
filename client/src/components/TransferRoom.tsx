@@ -178,6 +178,7 @@ export const TransferRoom = () => {
                  addLog(`📂 Decompressing...`);
                  finalBlob = await decompressBlob(blob);
                  if (finalName.endsWith('.gz')) finalName = finalName.slice(0, -3);
+                 if (finalName.endsWith('.br')) finalName = finalName.slice(0, -3);
               }
 
               const url = URL.createObjectURL(finalBlob);

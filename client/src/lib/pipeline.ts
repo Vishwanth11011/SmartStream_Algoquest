@@ -1,16 +1,15 @@
 import { encryptChunk, decryptChunk } from './crypto';
 
-const CHUNK_SIZE = 128 * 1024; // 64KB chunks (Optimal for WebRTC)
+const CHUNK_SIZE = 128 * 1024; // 64KB chunks
 
 /**
  * 📤 SENDER PIPELINE
- * Revised: Accepts an already-compressed file, Encrypts it, and Sends it.
- * No double-compression happens here.
+ * Pure streaming: Reads input (raw or compressed), Encrypts, Sends.
  */
 export const sendFilePipeline = async (
   file: File,
   sharedKey: CryptoKey,
-  _algo: string, 
+  _algo: string, // Unused, keeping signature consistent
   onChunk: (chunk: ArrayBuffer) => Promise<void>
 ) => {
   const startTime = performance.now();
@@ -18,8 +17,6 @@ export const sendFilePipeline = async (
   let finalSize = 0;
   let badChunks = 0;
 
-  // 1. CREATE STREAM (Standard Read)
-  // We do NOT compress here because compression.ts already did it!
   const stream = file.stream();
   const reader = stream.getReader();
   
@@ -39,12 +36,13 @@ export const sendFilePipeline = async (
         break;
       }
 
-      // Buffer Logic (Accumulate 64KB chunks for stable encryption)
+      // Buffer accumulator
       const newBuffer = new Uint8Array(buffer.length + value.length);
       newBuffer.set(buffer);
       newBuffer.set(value, buffer.length);
       buffer = newBuffer;
 
+      // Slice exact chunks
       while (buffer.length >= CHUNK_SIZE) {
         const chunk = buffer.slice(0, CHUNK_SIZE);
         buffer = buffer.slice(CHUNK_SIZE);
@@ -70,13 +68,14 @@ export const sendFilePipeline = async (
   return { originalSize, finalSize, duration, speed, badChunks };
 };
 
+
 /**
- * 📥 RECEIVER PIPELINE
- * 1. Decrypt -> 2. Decompress (If needed) -> 3. Rebuild
+ * 📥 RECEIVER PIPELINE (FIXED)
+ * Removed live decompression to prevent hangs. 
+ * Now just decrypts and assembles. Decompression happens in TransferRoom.
  */
 export class ReceiverPipeline {
   private key: CryptoKey;
-  private writer: WritableStreamDefaultWriter;
   
   private receivedChunks: ArrayBuffer[] = [];
   private totalSize = 0;
@@ -86,52 +85,23 @@ export class ReceiverPipeline {
 
   private onFinish: (blob: Blob, stats: any) => void;
 
-  constructor(sharedKey: CryptoKey, algo: string, onFinish: (blob: Blob, stats: any) => void) {
+  constructor(sharedKey: CryptoKey, _algo: string, onFinish: (blob: Blob, stats: any) => void) {
     this.key = sharedKey;
     this.onFinish = onFinish;
-
-    // 1. SETUP DECOMPRESSION (The Pipeline)
-    let transformStream = new TransformStream(); 
-    const { readable, writable } = transformStream;
-    this.writer = writable.getWriter();
-
-    let outputStream = readable;
-    
-    // ✅ ROBUST CHECK: Matches "Gzip (Universal)", "Gzip (Audio)", etc.
-    if (algo.includes('Gzip') || algo.includes('Adaptive')) {
-      outputStream = outputStream.pipeThrough(new DecompressionStream('gzip'));
-    } 
-    // ✅ ROBUST CHECK: Matches "Brotli (Text)", "Brotli (Dense)"
-    else if (algo.includes('Brotli')) {
-      outputStream = outputStream.pipeThrough(new DecompressionStream('deflate'));
-    }
-
-    this.readStream(outputStream);
+    // No more TransformStream here - eliminates the bottleneck
   }
 
-  // 2. READER LOOP (Saves the decompressed data)
-  private async readStream(stream: ReadableStream) {
-    const reader = stream.getReader();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        this.receivedChunks.push(value);
-        this.totalSize += value.byteLength; 
-      }
-    } catch (e) {
-      console.error("Decompression Error (Likely wrong algo match):", e);
-      this.badChunks++;
-    }
-  }
-
-  // 3. PROCESS INCOMING (Decrypt -> Push to Pipe)
+  // DIRECT PROCESSING (No stream piping = No deadlocks)
   public async processChunk(chunk: Uint8Array) {
     this.networkSize += chunk.byteLength; 
 
     try {
+      // 1. Decrypt
       const decrypted = await decryptChunk(this.key, chunk);
-      await this.writer.write(decrypted);
+      
+      // 2. Store directly
+      this.receivedChunks.push(decrypted);
+      this.totalSize += decrypted.byteLength;
     } catch (e) {
       console.error("Decryption Failed:", e);
       this.badChunks++;
@@ -139,9 +109,7 @@ export class ReceiverPipeline {
   }
 
   public async finish() {
-    await this.writer.close();
-    await new Promise(r => setTimeout(r, 100)); // Allow stream to flush
-
+    // No writer.close() needed anymore, just assemble
     const blob = new Blob(this.receivedChunks);
     
     const duration = ((performance.now() - this.startTime) / 1000).toFixed(2);
