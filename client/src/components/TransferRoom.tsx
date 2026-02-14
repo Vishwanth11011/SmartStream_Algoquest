@@ -8,7 +8,7 @@ import { WebRTCManager } from '../lib/webrtc';
 import { processFile } from '../lib/compression'; // ✅ FIX: Use 'processFile' not 'compressImage'
 import { FilePicker } from './FilePicker';
 import { 
-  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Link2Off, Zap, Terminal, Signal, Loader2, UserX, Search, ChevronDown, UserCheck 
+  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Link2Off, Zap, Terminal, Signal, Loader2, UserX, Search, ChevronDown, UserCheck, LogOut
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -305,7 +305,23 @@ export const TransferRoom = () => {
       setIsTransferring(false);
       setProgress(0);
     }
+
+
+    
   };
+
+  const handleLogout = () => {
+      // 1. Clear Credentials
+      localStorage.removeItem('username');
+      localStorage.removeItem('token'); 
+
+      // 2. Kill Connection (Stops background traffic)
+      if (socket.connected) socket.disconnect();
+      if (webrtcRef.current) webrtcRef.current.close();
+
+      // 3. Redirect to Login (Unmounts this component entirely)
+      navigate('/auth');
+    };
 
   // --- RENDER ---
   return (
@@ -314,18 +330,36 @@ export const TransferRoom = () => {
       {/* NAVBAR */}
       <nav className="sticky top-0 z-50 border-b border-gray-800 backdrop-blur-md bg-[#0B0F14]/80">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+          
+          {/* Logo Section */}
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-900/50">
               <Cpu className="text-white w-5 h-5" />
             </div>
             <span className="font-bold text-xl tracking-tight text-white">SmartStream <span className="text-blue-500 text-xs align-top">PRO</span></span>
           </div>
+
+          {/* Right Controls */}
           <div className="flex items-center gap-4">
-             <div className={clsx("flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold border", status === 'Online' ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-red-500/10 border-red-500/20 text-red-400")}>
+             {/* Status Badge (Hidden on mobile to save space) */}
+             <div className={clsx("flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold border hidden sm:flex", status === 'Online' ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-red-500/10 border-red-500/20 text-red-400")}>
                <div className={clsx("w-2 h-2 rounded-full", status === 'Online' ? "bg-green-400" : "bg-red-400")} />
-               {status === 'Online' ? 'Signaling OK' : 'No Signal'}
+               {status === 'Online' ? 'Signal OK' : 'No Signal'}
              </div>
+
+             <div className="h-6 w-px bg-gray-800 mx-1 hidden sm:block" />
+
+             {/* Username */}
              <span className="text-sm font-medium text-gray-400 hidden sm:block">@{username}</span>
+
+             {/* ✅ NEW: Sign Out Button */}
+             <button 
+               onClick={handleLogout}
+               className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800/50 hover:bg-red-500/10 hover:text-red-400 text-gray-400 transition-all border border-transparent hover:border-red-500/20 group"
+             >
+               <LogOut className="w-4 h-4 group-hover:scale-110 transition-transform" />
+               <span className="text-xs font-bold">Sign Out</span>
+             </button>
           </div>
         </div>
       </nav>
