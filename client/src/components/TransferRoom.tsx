@@ -19,15 +19,23 @@ const COLORS = {
   text: '#E5E7EB',
 };
 
-// --- HELPER: Decompress Gzip (Browser Native) ---
-const decompressBlob = async (blob: Blob): Promise<Blob> => {
+// --- HELPER: Robust Decompression ---
+const decompressBlob = async (blob: Blob, algo: string): Promise<Blob> => {
   try {
-    const ds = new DecompressionStream('gzip');
+    let format: CompressionFormat | null = null;
+    
+    // Explicitly map our algo names to browser formats
+    if (algo.includes('Gzip')) format = 'gzip';
+    else if (algo.includes('Brotli')) format = 'deflate'; 
+    
+    if (!format) return blob; // Not a compressed format we know
+
+    const ds = new DecompressionStream(format);
     const decompressedStream = blob.stream().pipeThrough(ds);
     return await new Response(decompressedStream).blob();
   } catch (error) {
-    console.warn("Decompression skipped (File might not be valid Gzip):", error);
-    return blob; // Return original if it fails
+    console.warn("Decompression failed (returning original):", error);
+    return blob; // Safety fallback
   }
 };
 
@@ -164,26 +172,41 @@ export const TransferRoom = () => {
         if (msg.type === 'file-start') {
           setIsTransferring(true);
           addLog(`Receiving: ${msg.name}`);
-          setQueueStatus(`Downloading ${msg.name}...`);
+          setQueueStatus(`Downloading...`);
           setProgress(0);
           
           if (sharedKeyRef.current) {
+            // Initialize Receiver Pipeline
             receiverPipelineRef.current = new ReceiverPipeline(sharedKeyRef.current, msg.algo, async (blob, stats) => {
               
-              // DECOMPRESSION LOGIC
+              // --- 🛠️ FIX: DECOMPRESSION & RENAMING ---
               let finalBlob = blob;
               let finalName = msg.name;
 
-              if (msg.algo && msg.algo.includes('GZIP')) {
-                 addLog(`📂 Decompressing...`);
-                 finalBlob = await decompressBlob(blob);
+              // Check if the file needs decompression based on Algorithm OR Extension
+              const needsDecompression = msg.algo.includes('Gzip') || msg.algo.includes('Brotli') || finalName.endsWith('.gz') || finalName.endsWith('.br');
+
+              if (needsDecompression) {
+                 setQueueStatus("Decompressing...");
+                 addLog(`📂 Unpacking ${msg.algo}...`);
+                 
+                 // Run Decompression
+                 finalBlob = await decompressBlob(blob, msg.algo);
+                 
+                 // Fix Name: Remove .gz or .br extension if present
                  if (finalName.endsWith('.gz')) finalName = finalName.slice(0, -3);
                  if (finalName.endsWith('.br')) finalName = finalName.slice(0, -3);
               }
 
               const url = URL.createObjectURL(finalBlob);
               setReceivedFiles(prev => [...prev, { name: finalName, url }]);
-              setTransferStats(stats);
+              
+              // Update Stats
+              setTransferStats({
+                 ...stats,
+                 finalSize: finalBlob.size // Show the actual unpacked size
+              });
+              
               addLog(`✅ Saved: ${finalName}`);
               setProgress(100);
               setIsTransferring(false);
@@ -207,6 +230,7 @@ export const TransferRoom = () => {
       }
     } catch (e) {}
 
+    // Process Binary Chunk
     if (receiverPipelineRef.current) {
       receiverPipelineRef.current.processChunk(new Uint8Array(data));
       setProgress(p => (p >= 98 ? 98 : p + 0.5));
