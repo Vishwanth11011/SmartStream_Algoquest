@@ -10,7 +10,7 @@ const CHUNK_SIZE = 128 * 1024; // 64KB chunks (Optimal for WebRTC)
 export const sendFilePipeline = async (
   file: File,
   sharedKey: CryptoKey,
-  algo: string, // Kept for logging/metadata, not used for processing here
+  _algo: string, 
   onChunk: (chunk: ArrayBuffer) => Promise<void>
 ) => {
   const startTime = performance.now();
