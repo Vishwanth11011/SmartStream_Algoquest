@@ -203,8 +203,9 @@ export const TransferRoom = () => {
               
               // Update Stats
               setTransferStats({
-                 ...stats,
-                 finalSize: finalBlob.size // Show the actual unpacked size
+                ...stats,
+                originalSize: finalBlob.size, 
+                finalSize: stats.originalSize 
               });
               
               addLog(`✅ Saved: ${finalName}`);
@@ -318,8 +319,7 @@ export const TransferRoom = () => {
 
         setTransferStats({
           ...stats,
-          originalSize: meta.originalSize,
-          finalSize: stats.originalSize 
+          originalSize: meta.originalSize
         });
         addLog(`✅ Verified: "${file.name}"`);
         setProgress(100);
@@ -365,7 +365,7 @@ export const TransferRoom = () => {
             <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-900/50">
               <Cpu className="text-white w-5 h-5" />
             </div>
-            <span className="font-bold text-xl tracking-tight text-white">SmartStream <span className="text-blue-500 text-xs align-top">PRO</span></span>
+            <span className="font-bold text-xl tracking-tight text-white">SmartStream <span className="text-blue-500 text-xs align-top"></span></span>
           </div>
 
           {/* Right Controls */}
