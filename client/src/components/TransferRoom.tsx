@@ -316,7 +316,11 @@ export const TransferRoom = () => {
            }, 100);
         });
 
-        setTransferStats(stats);
+        setTransferStats({
+          ...stats,
+          originalSize: meta.originalSize,
+          finalSize: stats.originalSize 
+        });
         addLog(`✅ Verified: "${file.name}"`);
         setProgress(100);
         await new Promise(r => setTimeout(r, 200)); 
