@@ -358,7 +358,7 @@ export const TransferRoom = () => {
                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800/50 hover:bg-red-500/10 hover:text-red-400 text-gray-400 transition-all border border-transparent hover:border-red-500/20 group"
              >
                <LogOut className="w-4 h-4 group-hover:scale-110 transition-transform" />
-               <span className="text-xs font-bold">Sign Out</span>
+               {/* <span className="text-xs font-bold">Sign Out</span> */}
              </button>
           </div>
         </div>
