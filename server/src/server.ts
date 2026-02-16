@@ -39,11 +39,9 @@ app.post('/api/auth/register', async (req, res): Promise<any> => {
   try {
     const { username, email, password, fullName, securityQuestion, securityAnswer } = req.body;
     
-    // Validate Email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) return res.status(400).json({ error: "Invalid email format." });
 
-    // Validate Password
     if (!password || password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
     if (!/[a-zA-Z]/.test(password) || !/\d/.test(password)) return res.status(400).json({ error: "Password must contain letters and numbers." });
 
@@ -51,7 +49,6 @@ app.post('/api/auth/register', async (req, res): Promise<any> => {
     const existing = await User.findOne({ $or: [{ email }, { username: cleanUsername }] });
     if (existing) return res.status(400).json({ error: "Username or Email already taken" });
 
-    // Hash Password & Security Answer
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
     const hashedAnswer = await bcrypt.hash(securityAnswer.toLowerCase(), salt);
@@ -99,7 +96,7 @@ app.post('/api/auth/login', async (req, res): Promise<any> => {
   }
 });
 
-// ✅ C. Get Security Question (NEW - Fixes 'Action Failed')
+// C. Get Security Question
 app.get('/api/auth/security-question/:username', async (req, res): Promise<any> => {
   try {
     const { username } = req.params;
@@ -108,7 +105,6 @@ app.get('/api/auth/security-question/:username', async (req, res): Promise<any> 
     const user = await User.findOne({ username: cleanUsername });
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // Return the question only
     res.json({ question: user.securityQuestion });
   } catch (error) {
     console.error("Fetch Question Error:", error);
@@ -116,7 +112,7 @@ app.get('/api/auth/security-question/:username', async (req, res): Promise<any> 
   }
 });
 
-// ✅ D. Reset Password (NEW - Fixes 'Action Failed')
+// D. Reset Password
 app.post('/api/auth/reset-password', async (req, res): Promise<any> => {
   try {
     const { username, securityAnswer, newPassword } = req.body;
@@ -125,15 +121,12 @@ app.post('/api/auth/reset-password', async (req, res): Promise<any> => {
     const user = await User.findOne({ username: cleanUsername });
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // Verify Answer (Compare with stored hash)
     const isAnswerValid = await bcrypt.compare(securityAnswer.toLowerCase(), user.securityAnswer);
     if (!isAnswerValid) return res.status(400).json({ message: "Incorrect security answer" });
 
-    // Hash New Password
     const salt = await bcrypt.genSalt(10);
     const newHashedPassword = await bcrypt.hash(newPassword, salt);
 
-    // Update User
     user.password = newHashedPassword;
     await user.save();
 
@@ -152,21 +145,22 @@ app.post('/api/ai/analyze', (req, res) => {
   res.json({ status: "Verified" });
 });
 
-// 5. SOCKET.IO SERVER
+// 5. SOCKET.IO SERVER (FULL MESH UPGRADE)
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: "*" },
   maxHttpBufferSize: 1e8 
 });
 
-// Dual Map System for O(1) Access
+// Data Structures
 const usernameToSocket = new Map<string, string>(); 
 const socketToUsername = new Map<string, string>(); 
+const roomUsers: Record<string, { id: string, username: string }[]> = {}; // ✅ Tracks Room Membership
 
 io.on('connection', (socket) => {
   console.log(`🔌 New Connection: ${socket.id}`);
 
-  // A. Register User
+  // A. Global Registration (For Login/Status)
   socket.on('register-user', (rawUsername: string) => {
     const username = rawUsername.trim().toLowerCase();
     const oldSocketId = usernameToSocket.get(username);
@@ -180,23 +174,36 @@ io.on('connection', (socket) => {
     io.emit('user-online', { users: Array.from(usernameToSocket.keys()).map(u => ({ username: u })) });
   });
 
-  // B. The Relay
-  socket.on('file-relay', (data, ackCallback) => { 
-    const { targetUsername, payload } = data;
-    const cleanTarget = targetUsername.trim().toLowerCase();
-    const targetSocketId = usernameToSocket.get(cleanTarget);
+  // B. JOIN ROOM (For Multi-Peer Mesh)
+  socket.on('join-room', (roomId: string, username: string) => {
+    socket.join(roomId);
+    socket.data.roomId = roomId;
+    socket.data.username = username;
+
+    if (!roomUsers[roomId]) roomUsers[roomId] = [];
     
-    if (targetSocketId) {
-      const senderName = socketToUsername.get(socket.id);
-      io.to(targetSocketId).emit('file-relay', { from: senderName, payload }, (responseFromReceiver: any) => {
-        if (ackCallback) ackCallback(responseFromReceiver); 
-      });
-    } else {
-      if (ackCallback) ackCallback({ error: "User offline or not found." });
+    // Add to room list if not already there
+    if (!roomUsers[roomId].find(u => u.id === socket.id)) {
+        roomUsers[roomId].push({ id: socket.id, username });
     }
+
+    console.log(`📢 ${username} joined Room: ${roomId}`);
+
+    // 1. Tell everyone else: "New user joined!"
+    socket.to(roomId).emit('user-joined', { id: socket.id, username });
+
+    // 2. Tell new user: "Here is everyone else!"
+    const existingUsers = roomUsers[roomId].filter(u => u.id !== socket.id);
+    socket.emit('existing-users', existingUsers);
   });
 
-  // ✅ D. User Check (Search Filter)
+  // C. SIGNAL RELAY (Targeted P2P Handshake)
+  // This replaces the old 'file-relay' for the mesh network
+  socket.on('signal', ({ target, payload }) => {
+    io.to(target).emit('signal', { sender: socket.id, payload });
+  });
+
+  // D. User Check (Search Filter - Backward Compatibility)
   socket.on('check-user', (targetUsername: string) => {
     if (!targetUsername) return;
     const cleanTarget = targetUsername.trim().toLowerCase();
@@ -208,14 +215,29 @@ io.on('connection', (socket) => {
     });
   });
 
-  // C. Disconnect
+  // E. Disconnect & Cleanup
   socket.on('disconnect', () => {
     const username = socketToUsername.get(socket.id);
+    const { roomId } = socket.data;
+
+    // 1. Remove from Global Map
     if (username) {
       console.log(`❌ Disconnected: ${username}`);
       usernameToSocket.delete(username);
       socketToUsername.delete(socket.id);
       io.emit('user-online', { users: Array.from(usernameToSocket.keys()).map(u => ({ username: u })) });
+    }
+
+    // 2. Remove from Room
+    if (roomId && roomUsers[roomId]) {
+      roomUsers[roomId] = roomUsers[roomId].filter(u => u.id !== socket.id);
+      // Notify room members to close that specific connection
+      io.to(roomId).emit('user-left', socket.id);
+      
+      // Clean up empty rooms
+      if (roomUsers[roomId].length === 0) {
+        delete roomUsers[roomId];
+      }
     }
   });
 });

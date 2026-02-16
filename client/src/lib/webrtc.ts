@@ -1,4 +1,3 @@
-// client/src/lib/webrtc.ts
 import { Socket } from 'socket.io-client';
 
 const ICE_SERVERS = {
@@ -9,84 +8,104 @@ const ICE_SERVERS = {
 };
 
 export class WebRTCManager {
-  public peerConnection: RTCPeerConnection | null = null;
+  public peerConnection: RTCPeerConnection;
   public dataChannel: RTCDataChannel | null = null;
   private socket: Socket;
-  private targetUser: string;
-  private onDataReceived: (data: ArrayBuffer) => void;
-  private onStatusChange: (status: string) => void;
+  private targetId: string; // ✅ Now targets specific Socket ID (for Mesh)
+  private onData: (data: ArrayBuffer) => void;
+  private onStateChange: (state: string) => void;
 
-  constructor(socket: Socket, targetUser: string, onData: (d: ArrayBuffer) => void, onStatus: (s: string) => void) {
+  constructor(socket: Socket, targetId: string, onData: (data: ArrayBuffer) => void, onStateChange: (state: string) => void) {
     this.socket = socket;
-    this.targetUser = targetUser;
-    this.onDataReceived = onData;
-    this.onStatusChange = onStatus;
-  }
+    this.targetId = targetId;
+    this.onData = onData;
+    this.onStateChange = onStateChange;
 
-  public async initConnection(isInitiator: boolean) {
     this.peerConnection = new RTCPeerConnection(ICE_SERVERS);
 
+    // 1. ICE Candidate Handling
     this.peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        this.socket.emit('file-relay', {
-          targetUsername: this.targetUser,
-          payload: { type: 'ice-candidate', candidate: event.candidate }
+        this.socket.emit('signal', { 
+          target: this.targetId, 
+          payload: { type: 'ice-candidate', candidate: event.candidate } 
         });
       }
     };
 
+    // 2. Connection State Monitoring
     this.peerConnection.onconnectionstatechange = () => {
-      this.onStatusChange(this.peerConnection?.connectionState || 'closed');
+      this.onStateChange(this.peerConnection.connectionState);
     };
 
+    // 3. Handle Incoming Data Channel (Receiver Side)
+    this.peerConnection.ondatachannel = (event) => {
+      this.setupDataChannel(event.channel);
+    };
+  }
+
+  // Sender creates the channel
+  public async initConnection(isInitiator: boolean) {
     if (isInitiator) {
-      this.dataChannel = this.peerConnection.createDataChannel("file-transfer", { ordered: true });
-      this.setupChannelListeners();
+      // "ordered: true" ensures packets arrive in order (critical for files)
+      const channel = this.peerConnection.createDataChannel("file-transfer", { ordered: true });
+      this.setupDataChannel(channel);
+      
       const offer = await this.peerConnection.createOffer();
       await this.peerConnection.setLocalDescription(offer);
-      this.socket.emit('file-relay', { targetUsername: this.targetUser, payload: { type: 'offer', sdp: offer } });
-    } else {
-      this.peerConnection.ondatachannel = (event) => {
-        this.dataChannel = event.channel;
-        this.setupChannelListeners();
-      };
+      
+      this.socket.emit('signal', { 
+        target: this.targetId, 
+        payload: { type: 'offer', sdp: offer } 
+      });
     }
   }
 
-  private setupChannelListeners() {
-    if (!this.dataChannel) return;
-    this.dataChannel.onopen = () => this.onStatusChange('connected');
-    this.dataChannel.onclose = () => this.onStatusChange('disconnected');
-    this.dataChannel.onmessage = (e) => this.onDataReceived(e.data);
-  }
-
   public async handleSignal(payload: any) {
-    if (!this.peerConnection) return;
     if (payload.type === 'offer') {
       await this.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.sdp));
       const answer = await this.peerConnection.createAnswer();
       await this.peerConnection.setLocalDescription(answer);
-      this.socket.emit('file-relay', { targetUsername: this.targetUser, payload: { type: 'answer', sdp: answer } });
-    } else if (payload.type === 'answer') {
+      
+      this.socket.emit('signal', { 
+        target: this.targetId, 
+        payload: { type: 'answer', sdp: answer } 
+      });
+    } 
+    else if (payload.type === 'answer') {
       await this.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-    } else if (payload.type === 'ice-candidate') {
+    } 
+    else if (payload.type === 'ice-candidate') {
       await this.peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
     }
   }
 
+  private setupDataChannel(channel: RTCDataChannel) {
+    this.dataChannel = channel;
+    
+    // Set threshold for backpressure (256KB)
+    this.dataChannel.bufferedAmountLowThreshold = 256 * 1024;
+
+    this.dataChannel.onopen = () => this.onStateChange('connected');
+    this.dataChannel.onclose = () => this.onStateChange('disconnected');
+    this.dataChannel.onmessage = (e) => this.onData(e.data);
+  }
+
   // ✅ OPTIMIZED SEND LOGIC (Event-Driven Backpressure)
+  // This prevents the browser from crashing when sending large files to multiple people
   public async sendData(data: ArrayBuffer): Promise<void> {
     if (!this.dataChannel || this.dataChannel.readyState !== 'open') return;
 
-    // 1MB Limit prevents browser crash
+    // If buffer is full (>1MB), wait for it to drain
     if (this.dataChannel.bufferedAmount > 1024 * 1024) {
       await new Promise<void>(resolve => {
         if (!this.dataChannel) return resolve();
-        this.dataChannel.bufferedAmountLowThreshold = 256 * 1024; // Resume at 256KB
+        
         const onLow = () => {
           this.dataChannel?.removeEventListener('bufferedamountlow', onLow);
           resolve();
         };
+        
         this.dataChannel.addEventListener('bufferedamountlow', onLow);
       });
     }
@@ -94,12 +113,12 @@ export class WebRTCManager {
     try {
       this.dataChannel.send(data);
     } catch (e) {
-      console.error("Send Error", e);
+      console.error(`Send Error to ${this.targetId}:`, e);
     }
   }
 
   public close() {
     this.dataChannel?.close();
-    this.peerConnection?.close();
+    this.peerConnection.close();
   }
 }

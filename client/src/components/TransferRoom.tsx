@@ -20,7 +20,7 @@ const COLORS = {
 };
 
 // --- HELPER: Robust Decompression ---
-// Runs AFTER the transfer is complete to prevent pipeline stalls.
+// This ensures that even if the network stream is slightly fragmented, we reassemble and inflate correctly.
 const decompressBlob = async (blob: Blob, algo: string): Promise<Blob> => {
   try {
     let format: CompressionFormat | null = null;
@@ -29,14 +29,14 @@ const decompressBlob = async (blob: Blob, algo: string): Promise<Blob> => {
     if (algo.includes('Gzip') || algo.includes('Audio') || algo.includes('Adaptive')) format = 'gzip';
     else if (algo.includes('Brotli')) format = 'deflate'; 
     
-    if (!format) return blob; // Not a compressed format we know, return original
+    if (!format) return blob; // Not a compressed format we know, return original as-is
 
     const ds = new DecompressionStream(format);
     const decompressedStream = blob.stream().pipeThrough(ds);
     return await new Response(decompressedStream).blob();
   } catch (error) {
-    console.warn("Decompression failed (returning original):", error);
-    return blob; // Safety fallback
+    console.warn("Decompression failed (returning original file):", error);
+    return blob; // Safety fallback so user gets *something* even if decompression fails
   }
 };
 
@@ -46,21 +46,20 @@ const socket: Socket = io(SERVER_URL, { transports: ['websocket', 'polling'], re
 export const TransferRoom = () => {
   const navigate = useNavigate();
   
-  // --- STATE ---
+  // --- STATE MANAGEMENT ---
   const [username] = useState(localStorage.getItem('username') || '');
   const [status, setStatus] = useState('Connecting...');
   const [p2pState, setP2pState] = useState<string>('disconnected'); 
   
+  // Search & Verification
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<string | null>(null);
   const [targetUser, setTargetUser] = useState('');
   const [incomingRequest, setIncomingRequest] = useState<{from: string, key: JsonWebKey} | null>(null);
-  
-  // Search & Verification
   const [isSearching, setIsSearching] = useState(false);
   const [verifiedUser, setVerifiedUser] = useState<{name: string, status: string} | null>(null);
 
-  // Transfer & UI
+  // Transfer & Pipeline State
   const [encryptionReady, setEncryptionReady] = useState(false);
   const [isTransferring, setIsTransferring] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -70,6 +69,7 @@ export const TransferRoom = () => {
   const [queueStatus, setQueueStatus] = useState(''); 
   const [advancedStats, setAdvancedStats] = useState<any>(null);
 
+  // Refs for persistence across renders
   const keyPairRef = useRef<CryptoKeyPair | null>(null);
   const sharedKeyRef = useRef<CryptoKey | null>(null);
   const receiverPipelineRef = useRef<ReceiverPipeline | null>(null);
@@ -83,15 +83,17 @@ export const TransferRoom = () => {
     if (!username) { navigate('/auth'); return; }
     const cleanName = username.trim().toLowerCase();
     
+    // Generate Identity Keys immediately
     generateKeyPair().then(keys => { keyPairRef.current = keys; addLog("Identity Keys Generated"); });
     
     socket.emit('register-user', cleanName);
     setStatus('Online');
 
+    // Socket Event Listeners
     socket.on('connect', () => { setStatus('Online'); socket.emit('register-user', cleanName); });
     socket.on('disconnect', () => { setStatus('Offline'); setP2pState('disconnected'); });
 
-    // User Check Response
+    // User Verification Listener
     socket.on('user-status', (data: any) => {
       setIsSearching(false);
       if (data.status === 'online') {
@@ -103,18 +105,21 @@ export const TransferRoom = () => {
       }
     });
 
-    // Signaling
+    // P2P Signaling Relay
     socket.on('file-relay', async (data: any) => {
       const { from, payload } = data;
       if (!from) return;
 
+      // Handle Standard WebRTC Signals
       if (['offer', 'answer', 'ice-candidate'].includes(payload.type)) {
         if (webrtcRef.current) await webrtcRef.current.handleSignal(payload);
         return;
       }
+      // Handle Custom Connection Requests
       if (payload.type === 'conn-request') {
         setIncomingRequest({ from, key: payload.key });
       }
+      // Handle Connection Acceptance
       else if (payload.type === 'conn-accept') {
         const foreignKey = await importPublicKey(payload.key);
         if (keyPairRef.current) {
@@ -131,7 +136,7 @@ export const TransferRoom = () => {
     };
   }, [username, navigate]);
 
-  // --- 2. SEARCH DEBOUNCE ---
+  // --- 2. SEARCH DEBOUNCE LOGIC ---
   useEffect(() => {
     const delayDebounceFn = setTimeout(() => {
       if (searchQuery.length > 2 && searchQuery !== username) {
@@ -147,7 +152,7 @@ export const TransferRoom = () => {
     return () => clearTimeout(delayDebounceFn);
   }, [searchQuery, username]);
 
-  // --- 3. LOGOUT HANDLER ---
+  // --- 3. AUTH & CONNECTION HANDLERS ---
   const handleLogout = () => {
     localStorage.removeItem('username');
     localStorage.removeItem('token');
@@ -174,81 +179,6 @@ export const TransferRoom = () => {
     await webrtcRef.current.initConnection(isInitiator);
   };
 
-  // --- 4. RECEIVER LOGIC ---
-  const handleIncomingData = async (data: ArrayBuffer) => {
-    try {
-      const text = new TextDecoder().decode(data);
-      if (text.trim().startsWith('{')) {
-        const msg = JSON.parse(text);
-
-        if (msg.type === 'file-start') {
-          setIsTransferring(true);
-          addLog(`Receiving: ${msg.name}`);
-          setQueueStatus(`Downloading...`);
-          setProgress(0);
-          
-          if (sharedKeyRef.current) {
-            // Initialize Receiver Pipeline (Dumb Pipe - just decrypts & saves)
-            receiverPipelineRef.current = new ReceiverPipeline(sharedKeyRef.current, msg.algo, async (blob, stats) => {
-              
-              // --- DECOMPRESSION & RENAMING (Runs safely on complete file) ---
-              let finalBlob = blob;
-              let finalName = msg.name;
-
-              // Check if the file needs decompression based on Algorithm OR Extension
-              const needsDecompression = msg.algo.includes('Gzip') || msg.algo.includes('Brotli') || finalName.endsWith('.gz') || finalName.endsWith('.br');
-
-              if (needsDecompression) {
-                 setQueueStatus("Decompressing...");
-                 addLog(`📂 Unpacking ${msg.algo}...`);
-                 
-                 finalBlob = await decompressBlob(blob, msg.algo);
-                 
-                 // Fix Name: Remove .gz or .br extension if present
-                 if (finalName.endsWith('.gz')) finalName = finalName.slice(0, -3);
-                 if (finalName.endsWith('.br')) finalName = finalName.slice(0, -3);
-              }
-
-              const url = URL.createObjectURL(finalBlob);
-              setReceivedFiles(prev => [...prev, { name: finalName, url }]);
-              
-              // Update Stats: Show the REAL unpacked size vs Network size
-              setTransferStats({
-                 ...stats,
-                 originalSize: finalBlob.size, // Unpacked size
-                 finalSize: stats.originalSize // Network size (received bytes)
-              });
-              
-              addLog(`✅ Saved: ${finalName}`);
-              setProgress(100);
-              setIsTransferring(false);
-              setQueueStatus('');
-              
-              if (webrtcRef.current) {
-                 const ackMsg = JSON.stringify({ type: 'file-ack', name: msg.name });
-                 const encoder = new window.TextEncoder();
-                 webrtcRef.current.sendData(encoder.encode(ackMsg) as any);
-              }
-            });
-          }
-        } 
-        else if (msg.type === 'file-end') {
-          if (receiverPipelineRef.current) await receiverPipelineRef.current.finish();
-        }
-        else if (msg.type === 'file-ack') {
-           lastAckRef.current = msg.name;
-        }
-        return; 
-      }
-    } catch (e) {}
-
-    // Process Binary Chunk
-    if (receiverPipelineRef.current) {
-      receiverPipelineRef.current.processChunk(new Uint8Array(data));
-      setProgress(p => (p >= 98 ? 98 : p + 0.5));
-    }
-  };
-
   const sendConnectionRequest = async (target: string) => { 
     if(!keyPairRef.current) return; 
     const pubKey = await exportPublicKey(keyPairRef.current.publicKey); 
@@ -267,7 +197,83 @@ export const TransferRoom = () => {
     setIncomingRequest(null); 
   };
 
-  // --- 5. SENDER LOGIC (UPDATED WITH AUTO-BLOCK) ---
+  // --- 4. RECEIVER LOGIC (INCOMING FILE HANDLING) ---
+  const handleIncomingData = async (data: ArrayBuffer) => {
+    try {
+      const text = new TextDecoder().decode(data);
+      if (text.trim().startsWith('{')) {
+        const msg = JSON.parse(text);
+
+        if (msg.type === 'file-start') {
+          setIsTransferring(true);
+          addLog(`Receiving: ${msg.name}`);
+          setQueueStatus(`Downloading...`);
+          setProgress(0);
+          
+          if (sharedKeyRef.current) {
+            // Initialize Receiver Pipeline
+            receiverPipelineRef.current = new ReceiverPipeline(sharedKeyRef.current, msg.algo, async (blob, stats) => {
+              
+              // --- DECOMPRESSION & RENAMING ---
+              let finalBlob = blob;
+              let finalName = msg.name;
+
+              // Check if the file needs decompression based on Algorithm OR Extension
+              const needsDecompression = msg.algo.includes('Gzip') || msg.algo.includes('Brotli') || finalName.endsWith('.gz') || finalName.endsWith('.br');
+
+              if (needsDecompression) {
+                 setQueueStatus("Decompressing...");
+                 addLog(`📂 Unpacking ${msg.algo}...`);
+                 
+                 finalBlob = await decompressBlob(blob, msg.algo);
+                 
+                 // Strip extension if it was added during compression
+                 if (finalName.endsWith('.gz')) finalName = finalName.slice(0, -3);
+                 if (finalName.endsWith('.br')) finalName = finalName.slice(0, -3);
+              }
+
+              const url = URL.createObjectURL(finalBlob);
+              setReceivedFiles(prev => [...prev, { name: finalName, url }]);
+              
+              // Update Stats
+              setTransferStats({
+                 ...stats,
+                 originalSize: finalBlob.size, // Show actual unpacked size
+                 finalSize: stats.originalSize // Show what traveled over network
+              });
+              
+              addLog(`✅ Saved: ${finalName}`);
+              setProgress(100);
+              setIsTransferring(false);
+              setQueueStatus('');
+              
+              // Send Acknowledgment
+              if (webrtcRef.current) {
+                 const ackMsg = JSON.stringify({ type: 'file-ack', name: msg.name });
+                 const encoder = new window.TextEncoder();
+                 webrtcRef.current.sendData(encoder.encode(ackMsg) as any);
+              }
+            });
+          }
+        } 
+        else if (msg.type === 'file-end') {
+          if (receiverPipelineRef.current) await receiverPipelineRef.current.finish();
+        }
+        else if (msg.type === 'file-ack') {
+           lastAckRef.current = msg.name;
+        }
+        return; 
+      }
+    } catch (e) {}
+
+    // Process Binary Chunk via Pipeline
+    if (receiverPipelineRef.current) {
+      receiverPipelineRef.current.processChunk(new Uint8Array(data));
+      setProgress(p => (p >= 98 ? 98 : p + 0.5));
+    }
+  };
+
+  // --- 5. SENDER LOGIC (UPDATED WITH AUTO-BLOCK SECURITY) ---
   const startBatchTransfer = async (files: File[], algos: Map<string, string>) => {
     if (!webrtcRef.current || p2pState !== 'connected' || !sharedKeyRef.current) {
       return alert("P2P Connection not ready!");
@@ -288,7 +294,6 @@ export const TransferRoom = () => {
         // 1. Process (Compress + Security Scan)
         const { file: processedFile, meta } = await processFile(file);
         
-        // Use manually selected algo OR the one predicted by processFile
         const algoName = algos.get(file.name) || meta.algorithm;
         
         // Update Stats for UI
@@ -297,17 +302,17 @@ export const TransferRoom = () => {
 
         // ✅ 2. STRICT SECURITY BLOCK (Auto-Cancel)
         if (meta.securityStatus === 'Suspicious') {
-           // Notify the user it was blocked
+           // Notify the user it was blocked via alert
            alert(
              `🚫 SECURITY BLOCK: "${files[i].name}" was automatically removed.\n\n` +
              `Reason: ${meta.reason}\n` +
              `Risk Score: ${meta.riskScore}/100`
            );
            
-           // Log it in the terminal
+           // Log the block event
            addLog(`🚫 Auto-Blocked: ${files[i].name} (Malware Risk)`);
            
-           // Skip this file and move to the next one
+           // Skip this file immediately
            continue; 
         }
         
@@ -351,7 +356,7 @@ export const TransferRoom = () => {
            }, 100);
         });
 
-        // Correct Stats: Use Metadata Original Size (fixes 0% compression bug)
+        // Correct Stats: Use Metadata Original Size
         setTransferStats({
           ...stats,
           originalSize: meta.originalSize 
