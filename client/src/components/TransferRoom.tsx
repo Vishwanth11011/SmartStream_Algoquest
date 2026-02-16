@@ -32,7 +32,7 @@ const decompressBlob = async (blob: Blob, algo: string): Promise<Blob> => {
     const decompressedStream = blob.stream().pipeThrough(ds);
     return await new Response(decompressedStream).blob();
   } catch (error) {
-    console.warn("Decompression failed (returning original file):", error);
+    console.warn("Decompression failed:", error);
     return blob; 
   }
 };
@@ -46,7 +46,6 @@ export const TransferRoom = () => {
   // --- STATE ---
   const [username] = useState(localStorage.getItem('username') || '');
   const [status, setStatus] = useState('Connecting...');
-  // ✅ FIX: Added missing p2pState
   const [, setP2pState] = useState<string>('disconnected');
   
   const [roomId, setRoomId] = useState('');
@@ -69,7 +68,9 @@ export const TransferRoom = () => {
 
   // --- UI STATE ---
   const [isTransferring, setIsTransferring] = useState(false);
-  // Removed unused 'encryptionReady' state to fix warning
+  // ✅ FIX: Restored this state variable
+  const [encryptionReady, setEncryptionReady] = useState(false); 
+  
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [receivedFiles, setReceivedFiles] = useState<{name: string, url: string}[]>([]);
@@ -92,8 +93,6 @@ export const TransferRoom = () => {
     setStatus('Online');
 
     socket.on('connect', () => { setStatus('Online'); socket.emit('register-user', username); });
-    
-    // ✅ FIX: setP2pState is now defined
     socket.on('disconnect', () => { setStatus('Offline'); setP2pState('disconnected'); });
 
     socket.on('user-status', (data: any) => {
@@ -115,6 +114,7 @@ export const TransferRoom = () => {
             if (prev.find(p => p.id === sender)) return prev;
             return [...prev, { id: sender, username: `User ${sender.slice(0,4)}`, status: 'Connecting...' }];
         });
+        // We accept the offer (Initiator = false)
         manager = createPeerConnection(sender, false); 
       }
       
@@ -131,21 +131,25 @@ export const TransferRoom = () => {
             const shared = await deriveSharedKey(keyPairRef.current.privateKey, foreignKey);
             keysRef.current.set(sender, shared);
             addLog(`🔐 Secure Link Established with ${sender.slice(0,4)}`);
+            setEncryptionReady(true); // ✅ This will now work
             setPeers(prev => prev.map(p => p.id === sender ? { ...p, status: 'connected' } : p));
           }
         } catch(e) { console.error(e); }
       }
     });
 
+    // --- ROOM LOGIC (FIXED GLARE) ---
+    // Existing user waits (false)
     socket.on('user-joined', ({ id, username }) => {
       addLog(`${username} joined the room.`);
       setPeers(prev => {
         if (prev.find(p => p.id === id)) return prev;
         return [...prev, { id, username, status: 'Connecting...' }];
       });
-      createPeerConnection(id, true); 
+      createPeerConnection(id, false); 
     });
 
+    // New user calls (true)
     socket.on('existing-users', (users) => {
       users.forEach((u: any) => {
         setPeers(prev => {
@@ -162,6 +166,7 @@ export const TransferRoom = () => {
       peersRef.current.delete(id);
       keysRef.current.delete(id);
       setPeers(prev => prev.filter(p => p.id !== id));
+      if (peersRef.current.size === 0) setEncryptionReady(false); // ✅ This will now work
     });
 
     return () => { 
@@ -191,16 +196,15 @@ export const TransferRoom = () => {
     const manager = new WebRTCManager(socket, targetId, 
       (data) => handleIncomingData(data, targetId), 
       (state) => {
-        // Update local status for the specific peer
         setPeers(prev => prev.map(p => p.id === targetId ? { ...p, status: state } : p));
         
-        // Also update global P2P state just for tracking
-        if (state === 'connected') setP2pState('connected');
-
-        if (state === 'connected' && keyPairRef.current) {
-           exportPublicKey(keyPairRef.current.publicKey).then(k => {
-              socket.emit('signal', { target: targetId, payload: { type: 'pub-key', key: k } });
-           });
+        if (state === 'connected') {
+            setP2pState('connected');
+            if (keyPairRef.current) {
+                exportPublicKey(keyPairRef.current.publicKey).then(k => {
+                    socket.emit('signal', { target: targetId, payload: { type: 'pub-key', key: k } });
+                });
+            }
         }
       }
     );
@@ -277,7 +281,6 @@ export const TransferRoom = () => {
               setQueueStatus('');
               
               const ackMsg = JSON.stringify({ type: 'file-ack', name: msg.name });
-              // ✅ FIX: Cast to 'any' to satisfy strict TypeScript ArrayBuffer requirement
               peersRef.current.get(senderId)?.sendData(new TextEncoder().encode(ackMsg) as any);
             });
           }
@@ -318,10 +321,7 @@ export const TransferRoom = () => {
         }
         
         addLog(`🤖 Strategy: ${algoName}`);
-        if (file.size < meta.originalSize) {
-           addLog(`📉 Reduced by ${((meta.originalSize - file.size)/1024).toFixed(0)} KB`);
-        }
-
+        
         const activePeers = Array.from(peersRef.current.entries());
         let peerIndex = 1;
 
@@ -332,11 +332,9 @@ export const TransferRoom = () => {
            setQueueStatus(`Sending to Peer ${peerIndex}/${activePeers.length}...`);
            setProgress(0);
 
-           // ✅ FIX: Cast to 'any' for TS
            await manager.sendData(encoder.encode(JSON.stringify({ type: 'file-start', name: file.name, algo: algoName })) as any);
 
            await sendFilePipeline(file, sharedKey, algoName, async (chunk) => {
-              // ✅ FIX: Cast to 'any'
               manager.sendData(chunk as any);
               setProgress(p => (p >= 98 ? 98 : p + 0.5));
            });
@@ -344,7 +342,6 @@ export const TransferRoom = () => {
            // @ts-ignore
            while (manager.dataChannel?.bufferedAmount > 0) await new Promise(r => setTimeout(r, 50));
            
-           // ✅ FIX: Cast to 'any'
            await manager.sendData(encoder.encode(JSON.stringify({ type: 'file-end', name: file.name })) as any);
            
            addLog(`Waiting for Peer ${peerIndex} verification...`);
@@ -367,7 +364,7 @@ export const TransferRoom = () => {
       addLog("Batch Transfer Complete");
     } catch (e) {
       console.error(e);
-      addLog("❌ Transfer Error (Check Console)");
+      addLog("❌ Transfer Error");
     } finally {
       setIsTransferring(false);
       setProgress(0);
@@ -483,7 +480,8 @@ export const TransferRoom = () => {
                    <span className="text-sm font-bold text-blue-400">{queueStatus}</span>
                 </motion.div>
              )}
-             <FilePicker onFilesSelected={startBatchTransfer} disabled={(!isJoined && peers.length === 0) || isTransferring} />
+             {/* ✅ FIX: encryptionReady is now used here */}
+             <FilePicker onFilesSelected={startBatchTransfer} disabled={(!isJoined && peers.length === 0) || isTransferring || !encryptionReady} />
           </div>
           
           {/* ADVANCED STATS DROPDOWN */}
