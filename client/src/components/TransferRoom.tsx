@@ -243,7 +243,6 @@ export const TransferRoom = () => {
     navigate('/auth');
   };
 
-  // --- RECEIVER LOGIC ---
   const handleIncomingData = async (data: ArrayBuffer, senderId: string) => {
     try {
       const text = new TextDecoder().decode(data);
@@ -252,30 +251,38 @@ export const TransferRoom = () => {
         
         if (msg.type === 'file-start') {
           setIsTransferring(true);
-          addLog(`⬇️ Receiving from ${senderId.slice(0,4)}...`);
+          addLog(`⬇️ Receiving: ${msg.name}`);
           setProgress(0);
           
           const sharedKey = keysRef.current.get(senderId);
           if (sharedKey) {
             receiverPipelineRef.current = new ReceiverPipeline(sharedKey, msg.algo, async (blob, stats) => {
-              let finalBlob = blob;
-              let finalName = msg.name;
+              setQueueStatus("Finalizing...");
               
-              const needsDecompression = msg.algo.includes('Gzip') || msg.algo.includes('Brotli') || finalName.endsWith('.gz') || finalName.endsWith('.br');
+              // 1. Force Decompression and WAIT for it
+              let finalBlob = blob;
+              const needsDecompression = msg.algo.includes('Gzip') || msg.algo.includes('Brotli') || msg.name.endsWith('.gz');
 
               if (needsDecompression) {
-                 setQueueStatus("Decompressing...");
-                 addLog(`📂 Unpacking ${msg.algo}...`);
+                 addLog(`📂 Decrypting & Inflating...`);
                  finalBlob = await decompressBlob(blob, msg.algo);
-                 if (finalName.endsWith('.gz')) finalName = finalName.slice(0, -3);
-                 if (finalName.endsWith('.br')) finalName = finalName.slice(0, -3);
               }
 
-              const url = URL.createObjectURL(finalBlob);
+              // 2. Explicitly set the MIME type to PDF if applicable
+              // This helps the OS recognize the file correctly
+              const finalMime = msg.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : finalBlob.type;
+              const correctedBlob = new Blob([finalBlob], { type: finalMime });
+
+              // 3. Clean filename
+              let finalName = msg.name;
+              if (finalName.endsWith('.gz')) finalName = finalName.slice(0, -3);
+
+              const url = URL.createObjectURL(correctedBlob);
               setReceivedFiles(prev => [...prev, { name: finalName, url }]);
               
-              setTransferStats({ ...stats, originalSize: finalBlob.size, finalSize: stats.originalSize });
-              addLog(`✅ Saved: ${finalName}`);
+              setTransferStats({ ...stats, originalSize: correctedBlob.size, finalSize: stats.originalSize });
+              addLog(`✅ File Ready: ${finalName}`);
+              
               setProgress(100);
               setIsTransferring(false);
               setQueueStatus('');
@@ -285,11 +292,20 @@ export const TransferRoom = () => {
             });
           }
         } 
-        else if (msg.type === 'file-end') receiverPipelineRef.current?.finish();
-        else if (msg.type === 'file-ack') lastAckRef.current = msg.name;
+        else if (msg.type === 'file-end') {
+          // Add a small delay to ensure binary buffers are flushed
+          setTimeout(() => {
+            receiverPipelineRef.current?.finish();
+          }, 100);
+        }
+        else if (msg.type === 'file-ack') {
+          lastAckRef.current = msg.name;
+        }
         return; 
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error("Inbound Data Error:", e);
+    }
 
     if (receiverPipelineRef.current) {
       receiverPipelineRef.current.processChunk(new Uint8Array(data));
