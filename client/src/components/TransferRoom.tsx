@@ -5,10 +5,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { generateKeyPair, exportPublicKey, importPublicKey, deriveSharedKey } from '../lib/crypto';
 import { sendFilePipeline, ReceiverPipeline } from '../lib/pipeline';
 import { WebRTCManager } from '../lib/webrtc'; 
-import { processFile } from '../lib/compression'; // ✅ FIX: Use 'processFile' not 'compressImage'
+import { processFile } from '../lib/compression'; 
 import { FilePicker } from './FilePicker';
 import { 
-  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Link2Off, Zap, Terminal, Signal, Loader2, UserX, Search, ChevronDown, UserCheck, LogOut
+  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Link2Off, Zap, Terminal, Signal, Loader2, UserX, Search, ChevronDown, UserCheck, LogOut, ShieldAlert 
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -25,10 +25,10 @@ const decompressBlob = async (blob: Blob, algo: string): Promise<Blob> => {
     let format: CompressionFormat | null = null;
     
     // Explicitly map our algo names to browser formats
-    if (algo.includes('Gzip')) format = 'gzip';
+    if (algo.includes('Gzip') || algo.includes('Audio') || algo.includes('Adaptive')) format = 'gzip';
     else if (algo.includes('Brotli')) format = 'deflate'; 
     
-    if (!format) return blob; // Not a compressed format we know
+    if (!format) return blob; // Not a compressed format we know, return original
 
     const ds = new DecompressionStream(format);
     const decompressedStream = blob.stream().pipeThrough(ds);
@@ -55,10 +55,11 @@ export const TransferRoom = () => {
   const [targetUser, setTargetUser] = useState('');
   const [incomingRequest, setIncomingRequest] = useState<{from: string, key: JsonWebKey} | null>(null);
   
-  // ✅ FIX: Search States are now used
+  // Search & Verification
   const [isSearching, setIsSearching] = useState(false);
   const [verifiedUser, setVerifiedUser] = useState<{name: string, status: string} | null>(null);
 
+  // Transfer & UI
   const [encryptionReady, setEncryptionReady] = useState(false);
   const [isTransferring, setIsTransferring] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -89,7 +90,7 @@ export const TransferRoom = () => {
     socket.on('connect', () => { setStatus('Online'); socket.emit('register-user', cleanName); });
     socket.on('disconnect', () => { setStatus('Offline'); setP2pState('disconnected'); });
 
-    // ✅ LISTEN: User Verification Response
+    // User Check Response
     socket.on('user-status', (data: any) => {
       setIsSearching(false);
       if (data.status === 'online') {
@@ -101,6 +102,7 @@ export const TransferRoom = () => {
       }
     });
 
+    // Signaling
     socket.on('file-relay', async (data: any) => {
       const { from, payload } = data;
       if (!from) return;
@@ -128,7 +130,7 @@ export const TransferRoom = () => {
     };
   }, [username, navigate]);
 
-  // --- 2. SEARCH DEBOUNCE (Fixes "Blind Connect") ---
+  // --- 2. SEARCH DEBOUNCE ---
   useEffect(() => {
     const delayDebounceFn = setTimeout(() => {
       if (searchQuery.length > 2 && searchQuery !== username) {
@@ -144,6 +146,14 @@ export const TransferRoom = () => {
     return () => clearTimeout(delayDebounceFn);
   }, [searchQuery, username]);
 
+  // --- 3. LOGOUT HANDLER ---
+  const handleLogout = () => {
+    localStorage.removeItem('username');
+    localStorage.removeItem('token');
+    if (socket.connected) socket.disconnect();
+    if (webrtcRef.current) webrtcRef.current.close();
+    navigate('/auth');
+  };
 
   const initializeWebRTC = async (target: string, isInitiator: boolean) => {
     setP2pState('connecting');
@@ -163,6 +173,7 @@ export const TransferRoom = () => {
     await webrtcRef.current.initConnection(isInitiator);
   };
 
+  // --- 4. RECEIVER LOGIC ---
   const handleIncomingData = async (data: ArrayBuffer) => {
     try {
       const text = new TextDecoder().decode(data);
@@ -179,21 +190,18 @@ export const TransferRoom = () => {
             // Initialize Receiver Pipeline
             receiverPipelineRef.current = new ReceiverPipeline(sharedKeyRef.current, msg.algo, async (blob, stats) => {
               
-              // --- 🛠️ FIX: DECOMPRESSION & RENAMING ---
+              // --- DECOMPRESSION & RENAMING ---
               let finalBlob = blob;
               let finalName = msg.name;
 
-              // Check if the file needs decompression based on Algorithm OR Extension
               const needsDecompression = msg.algo.includes('Gzip') || msg.algo.includes('Brotli') || finalName.endsWith('.gz') || finalName.endsWith('.br');
 
               if (needsDecompression) {
                  setQueueStatus("Decompressing...");
                  addLog(`📂 Unpacking ${msg.algo}...`);
                  
-                 // Run Decompression
                  finalBlob = await decompressBlob(blob, msg.algo);
                  
-                 // Fix Name: Remove .gz or .br extension if present
                  if (finalName.endsWith('.gz')) finalName = finalName.slice(0, -3);
                  if (finalName.endsWith('.br')) finalName = finalName.slice(0, -3);
               }
@@ -203,9 +211,9 @@ export const TransferRoom = () => {
               
               // Update Stats
               setTransferStats({
-                ...stats,
-                originalSize: finalBlob.size, 
-                finalSize: stats.originalSize 
+                 ...stats,
+                 originalSize: finalBlob.size, // Unpacked size
+                 finalSize: stats.originalSize // Network size (received bytes)
               });
               
               addLog(`✅ Saved: ${finalName}`);
@@ -256,6 +264,7 @@ export const TransferRoom = () => {
     setIncomingRequest(null); 
   };
 
+  // --- 5. SENDER LOGIC ---
   const startBatchTransfer = async (files: File[], algos: Map<string, string>) => {
     if (!webrtcRef.current || p2pState !== 'connected' || !sharedKeyRef.current) {
       return alert("P2P Connection not ready!");
@@ -271,15 +280,31 @@ export const TransferRoom = () => {
       for (let i = 0; i < files.length; i++) {
         let file = files[i];
         
-        setQueueStatus(`Analyzing ${file.name}...`);
+        setQueueStatus(`Scanning ${file.name}...`);
         
-        // ✅ FIX: Use 'processFile' to get stats for ALL file types (syncs UI with Console)
+        // 1. Process (Compress + Security Scan)
         const { file: processedFile, meta } = await processFile(file);
         
+        // Use manually selected algo OR the one predicted by processFile
         const algoName = algos.get(file.name) || meta.algorithm;
         
-        file = processedFile; 
+        // Update Stats for UI
         setAdvancedStats(meta);
+        file = processedFile; // Swap to the compressed/processed file object
+
+        // ✅ 2. SECURITY CHECK
+        if (meta.securityStatus === 'Suspicious') {
+           const proceed = window.confirm(
+             `⚠️ SECURITY WARNING: "${files[i].name}" has a High Risk Score (${meta.riskScore}/100).\n` +
+             `Reason: ${meta.reason}\n\n` +
+             `Do you still want to send it?`
+           );
+           if (!proceed) {
+             addLog(`🚫 Blocked: ${files[i].name} (Security Risk)`);
+             continue; // Skip this file
+           }
+           addLog(`⚠️ Sending Suspicious File: ${files[i].name}`);
+        }
         
         addLog(`🤖 Strategy: ${algoName}`);
         if (file.size < meta.originalSize) {
@@ -291,14 +316,17 @@ export const TransferRoom = () => {
         setProgress(0);
         setTransferStats(null);
 
+        // Start Handshake
         const startMeta = JSON.stringify({ type: 'file-start', name: file.name, algo: algoName });
         await p2pManager.sendData(encoder.encode(startMeta) as any);
 
+        // Streaming Pipeline
         const stats = await sendFilePipeline(file, sharedKey, algoName, async (chunk) => {
            await p2pManager.sendData(chunk as any); 
            setProgress(p => (p >= 98 ? 98 : p + 0.1));
         });
 
+        // Drain Buffer
         await new Promise<void>(resolve => {
            const check = setInterval(() => {
               // @ts-ignore
@@ -306,6 +334,7 @@ export const TransferRoom = () => {
            }, 20);
         });
 
+        // End Handshake
         const endMeta = JSON.stringify({ type: 'file-end', name: file.name });
         await p2pManager.sendData(encoder.encode(endMeta) as any);
 
@@ -317,9 +346,10 @@ export const TransferRoom = () => {
            }, 100);
         });
 
+        // Correct Stats: Use Metadata Original Size (fixes 0% compression bug)
         setTransferStats({
           ...stats,
-          originalSize: meta.originalSize
+          originalSize: meta.originalSize 
         });
         addLog(`✅ Verified: "${file.name}"`);
         setProgress(100);
@@ -334,23 +364,7 @@ export const TransferRoom = () => {
       setIsTransferring(false);
       setProgress(0);
     }
-
-
-    
   };
-
-  const handleLogout = () => {
-      // 1. Clear Credentials
-      localStorage.removeItem('username');
-      localStorage.removeItem('token'); 
-
-      // 2. Kill Connection (Stops background traffic)
-      if (socket.connected) socket.disconnect();
-      if (webrtcRef.current) webrtcRef.current.close();
-
-      // 3. Redirect to Login (Unmounts this component entirely)
-      navigate('/auth');
-    };
 
   // --- RENDER ---
   return (
@@ -359,35 +373,22 @@ export const TransferRoom = () => {
       {/* NAVBAR */}
       <nav className="sticky top-0 z-50 border-b border-gray-800 backdrop-blur-md bg-[#0B0F14]/80">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          
-          {/* Logo Section */}
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-900/50">
               <Cpu className="text-white w-5 h-5" />
             </div>
-            <span className="font-bold text-xl tracking-tight text-white">SmartStream <span className="text-blue-500 text-xs align-top"></span></span>
+            <span className="font-bold text-xl tracking-tight text-white">SmartStream <span className="text-blue-500 text-xs align-top">PRO</span></span>
           </div>
-
-          {/* Right Controls */}
           <div className="flex items-center gap-4">
-             {/* Status Badge (Hidden on mobile to save space) */}
              <div className={clsx("flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold border hidden sm:flex", status === 'Online' ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-red-500/10 border-red-500/20 text-red-400")}>
                <div className={clsx("w-2 h-2 rounded-full", status === 'Online' ? "bg-green-400" : "bg-red-400")} />
                {status === 'Online' ? 'Signal OK' : 'No Signal'}
              </div>
-
              <div className="h-6 w-px bg-gray-800 mx-1 hidden sm:block" />
-
-             {/* Username */}
              <span className="text-sm font-medium text-gray-400 hidden sm:block">@{username}</span>
-
-             {/* ✅ NEW: Sign Out Button */}
-             <button 
-               onClick={handleLogout}
-               className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800/50 hover:bg-red-500/10 hover:text-red-400 text-gray-400 transition-all border border-transparent hover:border-red-500/20 group"
-             >
+             <button onClick={handleLogout} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800/50 hover:bg-red-500/10 hover:text-red-400 text-gray-400 transition-all border border-transparent hover:border-red-500/20 group">
                <LogOut className="w-4 h-4 group-hover:scale-110 transition-transform" />
-               {/* <span className="text-xs font-bold">Sign Out</span> */}
+               <span className="text-xs font-bold hidden md:block">Sign Out</span>
              </button>
           </div>
         </div>
@@ -421,7 +422,6 @@ export const TransferRoom = () => {
                 <div className="p-6">
                   <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2"><Signal className="w-4 h-4 text-blue-400" /> Find Peer</h2>
                   
-                  {/* ✅ FIX: SEARCH UI IMPLEMENTED (Uses UserX and verifiedUser) */}
                   <div className="relative group">
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5" />
                     <input 
@@ -439,7 +439,6 @@ export const TransferRoom = () => {
                       {searchQuery.length > 2 && !isSearching && (
                         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="absolute top-full left-0 right-0 mt-2 bg-[#1A202C] border border-gray-700 rounded-xl shadow-2xl z-50 overflow-hidden">
                            {verifiedUser ? (
-                             // ✅ USER FOUND STATE
                              <div className="p-3 flex items-center justify-between hover:bg-gray-800 cursor-pointer transition-colors" onClick={() => sendConnectionRequest(searchResult!)}>
                                <div className="flex items-center gap-3">
                                   <div className="w-8 h-8 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center border border-green-500/30">
@@ -455,7 +454,6 @@ export const TransferRoom = () => {
                                <button className="text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg shadow-lg">CONNECT</button>
                              </div>
                            ) : (
-                             // ✅ USER NOT FOUND STATE (Uses UserX)
                              <div className="p-4 text-center text-gray-500 text-sm flex items-center justify-center gap-2">
                                 <UserX className="w-4 h-4" /> User not found
                              </div>
@@ -487,14 +485,14 @@ export const TransferRoom = () => {
              
              <FilePicker onFilesSelected={startBatchTransfer} disabled={!encryptionReady || isTransferring} />
 
-             {/* TECH STATS DROPDOWN */}
+             {/* TECH STATS & SECURITY DROPDOWN */}
              <AnimatePresence>
                {advancedStats && (
                  <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="mt-4">
                    <details className="group bg-[#0B0F14] border border-gray-800 rounded-xl overflow-hidden transition-all duration-300 open:border-blue-500/30">
                      <summary className="flex items-center justify-between p-4 cursor-pointer hover:bg-gray-800/50 select-none">
                        <div className="flex items-center gap-2 text-sm font-bold text-gray-400 group-open:text-blue-400">
-                         <Cpu className="w-4 h-4" /> Additional Information
+                         <Cpu className="w-4 h-4" /> Analysis Report
                        </div>
                        <ChevronDown className="w-4 h-4 text-gray-600 group-open:rotate-180 transition-transform" />
                      </summary>
@@ -508,11 +506,14 @@ export const TransferRoom = () => {
                        </div>
                        <div className="space-y-1">
                          <span className="text-gray-500 uppercase tracking-wider">Entropy</span>
-                         <div className="text-gray-300">{advancedStats.entropy ? advancedStats.entropy.toFixed(3) : 'N/A'} <span className="text-gray-600">bits/byte</span></div>
+                         <div className="text-gray-300">{advancedStats.entropy ? advancedStats.entropy.toFixed(3) : 'N/A'} <span className="text-gray-600">bits</span></div>
                        </div>
                        <div className="space-y-1">
-                         <span className="text-gray-500 uppercase tracking-wider">Latency</span>
-                         <div className="text-gray-300">{advancedStats.timeTaken} <span className="text-gray-600">ms</span></div>
+                         <span className="text-gray-500 uppercase tracking-wider">Security</span>
+                         <div className={clsx("font-bold flex items-center gap-1", advancedStats.securityStatus === 'Suspicious' ? "text-red-400" : "text-green-400")}>
+                           {advancedStats.securityStatus === 'Suspicious' ? <ShieldAlert className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
+                           {advancedStats.securityStatus} ({advancedStats.riskScore}%)
+                         </div>
                        </div>
                        <div className="space-y-1">
                          <span className="text-gray-500 uppercase tracking-wider">Ratio</span>
@@ -571,7 +572,7 @@ export const TransferRoom = () => {
                {logs.map((log, i) => (
                  <motion.div key={i} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} className="flex gap-2">
                    <span className="text-blue-500/50">➜</span>
-                   <span className={clsx(log.includes('CRITICAL') || log.includes('Failed') ? "text-red-400" : log.includes('ESTABLISHED') || log.includes('Verified') ? "text-green-400" : "text-gray-300")}>{log}</span>
+                   <span className={clsx(log.includes('Blocked') || log.includes('Failed') ? "text-red-400" : log.includes('ESTABLISHED') || log.includes('Verified') ? "text-green-400" : "text-gray-300")}>{log}</span>
                  </motion.div>
                ))}
                <div className="animate-pulse text-blue-500">_</div>
