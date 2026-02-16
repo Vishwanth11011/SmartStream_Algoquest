@@ -20,6 +20,7 @@ const COLORS = {
 };
 
 // --- HELPER: Robust Decompression ---
+// Runs AFTER the transfer is complete to prevent pipeline stalls.
 const decompressBlob = async (blob: Blob, algo: string): Promise<Blob> => {
   try {
     let format: CompressionFormat | null = null;
@@ -187,13 +188,14 @@ export const TransferRoom = () => {
           setProgress(0);
           
           if (sharedKeyRef.current) {
-            // Initialize Receiver Pipeline
+            // Initialize Receiver Pipeline (Dumb Pipe - just decrypts & saves)
             receiverPipelineRef.current = new ReceiverPipeline(sharedKeyRef.current, msg.algo, async (blob, stats) => {
               
-              // --- DECOMPRESSION & RENAMING ---
+              // --- DECOMPRESSION & RENAMING (Runs safely on complete file) ---
               let finalBlob = blob;
               let finalName = msg.name;
 
+              // Check if the file needs decompression based on Algorithm OR Extension
               const needsDecompression = msg.algo.includes('Gzip') || msg.algo.includes('Brotli') || finalName.endsWith('.gz') || finalName.endsWith('.br');
 
               if (needsDecompression) {
@@ -202,6 +204,7 @@ export const TransferRoom = () => {
                  
                  finalBlob = await decompressBlob(blob, msg.algo);
                  
+                 // Fix Name: Remove .gz or .br extension if present
                  if (finalName.endsWith('.gz')) finalName = finalName.slice(0, -3);
                  if (finalName.endsWith('.br')) finalName = finalName.slice(0, -3);
               }
@@ -209,7 +212,7 @@ export const TransferRoom = () => {
               const url = URL.createObjectURL(finalBlob);
               setReceivedFiles(prev => [...prev, { name: finalName, url }]);
               
-              // Update Stats
+              // Update Stats: Show the REAL unpacked size vs Network size
               setTransferStats({
                  ...stats,
                  originalSize: finalBlob.size, // Unpacked size
@@ -264,7 +267,7 @@ export const TransferRoom = () => {
     setIncomingRequest(null); 
   };
 
-  // --- 5. SENDER LOGIC ---
+  // --- 5. SENDER LOGIC (UPDATED WITH AUTO-BLOCK) ---
   const startBatchTransfer = async (files: File[], algos: Map<string, string>) => {
     if (!webrtcRef.current || p2pState !== 'connected' || !sharedKeyRef.current) {
       return alert("P2P Connection not ready!");
@@ -292,18 +295,20 @@ export const TransferRoom = () => {
         setAdvancedStats(meta);
         file = processedFile; // Swap to the compressed/processed file object
 
-        // ✅ 2. SECURITY CHECK
+        // ✅ 2. STRICT SECURITY BLOCK (Auto-Cancel)
         if (meta.securityStatus === 'Suspicious') {
-           const proceed = window.confirm(
-             `⚠️ SECURITY WARNING: "${files[i].name}" has a High Risk Score (${meta.riskScore}/100).\n` +
-             `Reason: ${meta.reason}\n\n` +
-             `Do you still want to send it?`
+           // Notify the user it was blocked
+           alert(
+             `🚫 SECURITY BLOCK: "${files[i].name}" was automatically removed.\n\n` +
+             `Reason: ${meta.reason}\n` +
+             `Risk Score: ${meta.riskScore}/100`
            );
-           if (!proceed) {
-             addLog(`🚫 Blocked: ${files[i].name} (Security Risk)`);
-             continue; // Skip this file
-           }
-           addLog(`⚠️ Sending Suspicious File: ${files[i].name}`);
+           
+           // Log it in the terminal
+           addLog(`🚫 Auto-Blocked: ${files[i].name} (Malware Risk)`);
+           
+           // Skip this file and move to the next one
+           continue; 
         }
         
         addLog(`🤖 Strategy: ${algoName}`);
