@@ -69,7 +69,7 @@ export const TransferRoom = () => {
 
   // --- UI STATE ---
   const [isTransferring, setIsTransferring] = useState(false);
-  const [encryptionReady, setEncryptionReady] = useState(false); 
+  const [, setEncryptionReady] = useState(false); 
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [receivedFiles, setReceivedFiles] = useState<{name: string, url: string}[]>([]);
@@ -621,7 +621,6 @@ export const TransferRoom = () => {
     </div>
   );
 };
-
 
 // --- HELPER COMPONENT ---
 const StatCard = ({ label, value, icon: Icon, color }: any) => (
