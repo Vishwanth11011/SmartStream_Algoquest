@@ -8,7 +8,7 @@ import { WebRTCManager } from '../lib/webrtc';
 import { processFile } from '../lib/compression'; 
 import { FilePicker } from './FilePicker';
 import { 
-  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Zap, Terminal, Signal, Loader2, Users, Play, LogOut, ShieldAlert, Search, UserCheck, UserX, ChevronDown, ShieldCheck, Globe, Info 
+  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Zap, Terminal, Signal, Loader2, Users, Play, LogOut, ShieldAlert, Search, UserX, ChevronDown, ShieldCheck, Globe, Info 
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -64,7 +64,7 @@ export const TransferRoom = () => {
   // --- CORE IDENTITY STATE ---
   const [username] = useState(localStorage.getItem('username') || '');
   const [status, setStatus] = useState('Initializing Systems...');
-  const [p2pState, setP2pState] = useState<string>('disconnected');
+  const [, setP2pState] = useState<string>('disconnected');
   
   // --- NETWORKING: ROOMS & DISCOVERY ---
   const [roomId, setRoomId] = useState('');
