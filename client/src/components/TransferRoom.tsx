@@ -31,6 +31,7 @@ const decompressBlob = async (blob: Blob, algo: string, fileName: string): Promi
   try {
     // 1. If logic said "Store", we do NOT decompress
     if (algo.startsWith('Store')) {
+      console.log(`[Decompression] Skipping decompression - Store algo, blob size: ${blob.size}`);
       return blob;
     }
 
@@ -48,13 +49,22 @@ const decompressBlob = async (blob: Blob, algo: string, fileName: string): Promi
         format = 'gzip';
     }
 
-    if (!format) return blob; 
+    if (!format) {
+      console.log(`[Decompression] No matching format found for algo: ${algo}, returning blob as-is`);
+      return blob;
+    }
 
+    console.log(`[Decompression] Starting ${format} decompression, input size: ${blob.size} bytes`);
+    
     const ds = new DecompressionStream(format);
     const decompressedStream = blob.stream().pipeThrough(ds);
-    return await new Response(decompressedStream).blob();
+    const decompressedBlob = await new Response(decompressedStream).blob();
+    
+    console.log(`[Decompression] Success! Output size: ${decompressedBlob.size} bytes`);
+    return decompressedBlob;
   } catch (error) {
-    console.error("CRITICAL: Decompression Failed.", error);
+    console.error("CRITICAL: Decompression Failed.", error, "Returning original blob");
+    console.error("Blob details - Size:", blob.size, "Type:", blob.type, "Algo:", algo, "File:", fileName);
     return blob; // Return raw if decompression fails (safety net)
   }
 };
@@ -321,37 +331,71 @@ export const TransferRoom = () => {
             receiverPipelineRef.current = new ReceiverPipeline(sharedKey, msg.algo, async (blob, stats) => {
               setQueueStatus("Decrypting & Reassembling...");
 
-              // 1. Decompress
-              const finalBlob = await decompressBlob(blob, msg.algo, msg.name);
+              try {
+                console.log(`[Receiver] Received blob - size: ${blob.size}, algo: ${msg.algo}, name: ${msg.name}`);
 
-              // 2. MIME-TYPE ENFORCEMENT
-              const lowerName = msg.name.toLowerCase();
-              let finalMime = finalBlob.type;
-              if (lowerName.endsWith('.pdf')) finalMime = 'application/pdf';
-              else if (lowerName.endsWith('.ipynb')) finalMime = 'application/x-ipynb+json';
-              else if (lowerName.endsWith('.json')) finalMime = 'application/json';
+                // 1. Decompress the received (decrypted) blob
+                const decompressedBlob = await decompressBlob(blob, msg.algo, msg.name);
+                console.log(`[Receiver] After decompression - size: ${decompressedBlob.size}`);
 
-              const correctedBlob = new Blob([finalBlob], { type: finalMime });
+                // 2. Get original file data as bytes to verify integrity
+                const arrayBuffer = await decompressedBlob.arrayBuffer();
+                const uint8array = new Uint8Array(arrayBuffer);
+                console.log(`[Receiver] Decompressed data verified - ${uint8array.length} bytes`);
 
-              // 3. Extension Cleanup
-              const finalName = msg.name.replace(/\.gz$/, "").replace(/\.br$/, "");
-              const url = URL.createObjectURL(correctedBlob);
-              setReceivedFiles(prev => [...prev, { name: finalName, url }]);
+                // 3. MIME-TYPE ENFORCEMENT - Set correct MIME type based on file extension
+                const lowerName = msg.name.toLowerCase();
+                let finalMime = 'application/octet-stream';
+                
+                if (lowerName.endsWith('.pdf')) {
+                  finalMime = 'application/pdf';
+                } else if (lowerName.endsWith('.ipynb')) {
+                  finalMime = 'application/x-ipynb+json';
+                } else if (lowerName.endsWith('.json')) {
+                  finalMime = 'application/json';
+                } else if (lowerName.endsWith('.txt')) {
+                  finalMime = 'text/plain';
+                } else if (lowerName.endsWith('.png')) {
+                  finalMime = 'image/png';
+                } else if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) {
+                  finalMime = 'image/jpeg';
+                } else if (lowerName.endsWith('.zip')) {
+                  finalMime = 'application/zip';
+                }
 
-              // 4. Update Stats
-              setTransferStats({
-                ...stats,
-                originalSize: correctedBlob.size, // Actual size after decompression
-                finalSize: stats.originalSize,    // Size received over network
-                compressionRatio: (correctedBlob.size / (stats.originalSize || 1)).toFixed(2)
-              });
+                const correctedBlob = new Blob([uint8array], { type: finalMime });
 
-              addLog(`✅ File Integrated: ${finalName}`);
-              setProgress(100); setIsTransferring(false); setQueueStatus('');
-              
-              const ackMsg = JSON.stringify({ type: 'file-ack', name: msg.name });
-              const ackBuffer = new TextEncoder().encode(ackMsg);
-              peersRef.current.get(senderId)?.sendData(ackBuffer.buffer as ArrayBuffer);
+
+                // 5. Extension Cleanup - Remove compression extensions
+                const finalName = msg.name.replace(/\.gz$/, "").replace(/\.br$/, "").replace(/\.deflate$/, "");
+                const url = URL.createObjectURL(correctedBlob);
+                
+                setReceivedFiles(prev => [...prev, { name: finalName, url }]);
+                console.log(`[Receiver] File ready for download: ${finalName}`);
+
+                // 6. Update Stats
+                setTransferStats({
+                  ...stats,
+                  originalSize: correctedBlob.size, // Actual size after decompression
+                  finalSize: stats.originalSize,    // Size received over network
+                  compressionRatio: (correctedBlob.size / (stats.originalSize || 1)).toFixed(2)
+                });
+
+                addLog(`✅ File Integrated: ${finalName}`);
+                setProgress(100);
+                setIsTransferring(false);
+                setQueueStatus('');
+                
+                // 7. Send acknowledgment
+                const ackMsg = JSON.stringify({ type: 'file-ack', name: msg.name });
+                const ackBuffer = new TextEncoder().encode(ackMsg);
+                peersRef.current.get(senderId)?.sendData(ackBuffer.buffer as ArrayBuffer);
+              } catch (error) {
+                console.error('[Receiver] Error processing file:', error);
+                addLog(`❌ File processing failed: ${error}`);
+                setIsTransferring(false);
+                setQueueStatus('');
+              }
             });
           }
         }
