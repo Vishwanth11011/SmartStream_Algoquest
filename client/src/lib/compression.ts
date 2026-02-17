@@ -1,226 +1,149 @@
-// client/src/lib/compression.ts
+import pako from 'pako';
 
-export interface CompressionMeta {
+// --- INTELLIGENCE CONFIGURATION ---
+const CONFIG = {
+  SAMPLE_SIZE: 512 * 1024, // Analyze first 512KB for accurate entropy
+  ENTROPY_CUTOFF: 7.4,     // Above this, data is likely already compressed (Randomness limit)
+  TEXT_ENTROPY_MAX: 5.5,   // Text is usually predictable (low entropy)
+  RANSOMWARE_THRESHOLD: 7.9 // Text files with this entropy are likely encrypted malware
+};
+
+export interface FileMeta {
   algorithm: string;
   originalSize: number;
   compressedSize: number;
   entropy: number;
-  securityStatus: 'Safe' | 'Suspicious' | 'Malware'; // ✅ Security Flag
-  riskScore: number; // 0-100
-  reason?: string;   // Why it was flagged
-  timeTaken: number;
-  recommendation: string;
+  securityStatus: 'Safe' | 'Suspicious';
+  riskScore: number;
+  reason: string;
+  mimeType: string;
 }
 
-// 🧠 1. Shannon Entropy Calculator
-const calculateEntropy = async (data: Uint8Array): Promise<number> => {
+/**
+ * 🧠 CORE INTELLIGENCE: Shannon Entropy Calculator
+ * Measures information density. 
+ * 0 = Blank file, 8 = Maximum Compression/Encryption.
+ */
+const calculateEntropy = (data: Uint8Array): number => {
   const frequencies = new Array(256).fill(0);
-  for (let i = 0; i < data.length; i++) frequencies[data[i]]++;
-  return frequencies.reduce((sum, count) => {
-    if (count === 0) return sum;
-    const p = count / data.length;
-    return sum - p * Math.log2(p);
-  }, 0);
-};
+  const total = data.length;
 
-// 🔬 2. Advanced Metrics (Quartiles for Anomaly Detection)
-const calculateQuartiles = (data: Uint8Array) => {
-  const sorted = data.slice().sort();
-  const q25 = sorted[Math.floor(data.length * 0.25)];
-  const q75 = sorted[Math.floor(data.length * 0.75)];
-  return { q25, q75 };
-};
-
-// 🛡️ 3. SMART HYBRID SCANNER (The New Security Layer)
-const scanForThreats = async (file: File, initialChunk: Uint8Array, entropy: number): Promise<{ status: 'Safe' | 'Suspicious', score: number, reason?: string }> => {
-  let score = 0;
-  let reason = "";
-
-  // A. ENTROPY CHECK (High entropy = Packed/Encrypted malware potential)
-  if (entropy > 7.95) {
-    score += 40; 
-    reason += "Abnormally High Entropy (Packed/Encrypted); ";
-  } else if (entropy > 7.5) {
-    score += 20;
+  // 1. Frequency Analysis
+  for (let i = 0; i < total; i++) {
+    frequencies[data[i]]++;
   }
 
-  // B. CONTENT SCANNING (Smart Hybrid Strategy)
-  let textToScan = "";
-
-  // Strategy 1: Full Scan for Text/Code (Fast & Thorough)
-  if (file.type.startsWith('text/') || file.name.match(/\.(js|py|html|css|json|md|log|txt)$/i)) {
-    try {
-      textToScan = await file.text(); // Read EVERYTHING
-    } catch (e) { textToScan = ""; }
-  } 
-  // Strategy 2: Head & Tail Scan for Binaries (Efficient)
-  else {
-    // 1. Decode Header (Already in 'initialChunk')
-    const head = new TextDecoder("utf-8", { fatal: false }).decode(initialChunk);
-    
-    // 2. Read Footer (Last 1MB) - Malware often hides here!
-    let tail = "";
-    if (file.size > 2 * 1024 * 1024) {
-      const tailSlice = file.slice(file.size - (1 * 1024 * 1024)); 
-      const tailBuffer = await tailSlice.arrayBuffer();
-      tail = new TextDecoder("utf-8", { fatal: false }).decode(tailBuffer);
+  // 2. Shannon Formula: H(x) = -Σ p(x) log2 p(x)
+  let entropy = 0;
+  for (let i = 0; i < 256; i++) {
+    if (frequencies[i] > 0) {
+      const p = frequencies[i] / total;
+      entropy -= p * Math.log2(p);
     }
-    
-    textToScan = head + tail; // Combine for pattern matching
   }
 
-  // C. PATTERN MATCHING (Signatures)
+  return entropy;
+};
+
+/**
+ * 🕵️ DEEP INSPECTION: Magic Number Detection
+ * Identifies the TRUE file type, ignoring the extension.
+ */
+const detectTrueType = (header: Uint8Array): string => {
+  const hex = Array.from(header.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
   
-  // 1. Dangerous External Links (IPs, Executable Downloads)
-  const suspiciousLink = /(https?:\/\/(?:\d{1,3}\.){3}\d{1,3})|(https?:\/\/.*\.(exe|sh|bat|cmd|vbs|ps1))/gi;
-  if (textToScan.match(suspiciousLink)) {
-    score += 50;
-    reason += "Suspicious External Links (IP/Executables); ";
+  if (hex.startsWith('FFD8FF')) return 'image/jpeg';
+  if (hex.startsWith('89504E47')) return 'image/png';
+  if (hex.startsWith('25504446')) return 'application/pdf';
+  if (hex.startsWith('504B0304')) return 'application/zip'; // Zip, Docx, Jar, Apk
+  if (hex.startsWith('52617221')) return 'application/x-rar';
+  if (hex.startsWith('1F8B')) return 'application/gzip';
+  if (hex.startsWith('7B')) return 'application/json'; // JSON starts with {
+  
+  return 'unknown/binary';
+};
+
+/**
+ * 🚀 THE ENGINE: Smart Strategy Selection
+ */
+export const processFile = async (file: File): Promise<{ file: File | Blob, meta: FileMeta }> => {
+  const buffer = await file.arrayBuffer();
+  const rawData = new Uint8Array(buffer);
+  
+  // A. SAMPLING & ANALYSIS
+  const sample = rawData.slice(0, CONFIG.SAMPLE_SIZE);
+  const entropy = calculateEntropy(sample);
+  const trueType = detectTrueType(sample);
+  
+  // B. SECURITY HEURISTICS
+  let riskScore = 0;
+  let securityStatus: 'Safe' | 'Suspicious' = 'Safe';
+  let reason = 'Standard File';
+
+  // Rule: Text files shouldn't be random. If they are, it's hidden code or crypto-locker.
+  if ((file.name.endsWith('.txt') || file.name.endsWith('.js')) && entropy > CONFIG.RANSOMWARE_THRESHOLD) {
+    riskScore = 95;
+    securityStatus = 'Suspicious';
+    reason = 'Abnormal Entropy in Text File (Potential Encrypted Payload)';
   }
 
-  // 2. Script Execution Vectors (eval, powershell, cmd)
-  const shellCommands = /(cmd\.exe|powershell| \/bin\/sh|eval\(|document\.write\(|subprocess\.call)/gi;
-  if (textToScan.match(shellCommands)) {
-    score += 60;
-    reason += "Potential Script Execution Vector; ";
-  }
+  // C. COMPRESSION STRATEGY MATRIX
+  let processedData = rawData;
+  let algorithm = 'Store (No-Op)';
 
-  // 3. Embedded Objects in PDFs (JS injection)
-  if (file.type.includes('pdf') || file.name.endsWith('.pdf')) {
-    if (textToScan.includes('/JavaScript') || textToScan.includes('/JS') || textToScan.includes('/OpenAction')) {
-      score += 30;
-      reason += "Embedded PDF Scripts; ";
+  // STRATEGY 1: SKIP (Already Compressed Media)
+  // JPEGs, PNGs, MP4s, and ZIPs don't shrink. Compressing them wastes CPU and grows file size.
+  if (entropy > CONFIG.ENTROPY_CUTOFF || trueType.startsWith('image') || trueType.includes('zip') || trueType.includes('rar')) {
+    algorithm = 'Store (Passthrough)';
+    // Logic: Return raw data immediately.
+  }
+  
+  // STRATEGY 2: ULTRA (Text/Code/Data)
+  // Text relies on repeating patterns. DEFLATE Level 9 crushes this.
+  else if (entropy < CONFIG.TEXT_ENTROPY_MAX || trueType.includes('json') || file.type.includes('text')) {
+    try {
+      algorithm = 'Deflate (Ultra Level 9)';
+      // Pako Level 9 is slower but provides maximum density
+      processedData = pako.deflate(rawData, { level: 9 });
+    } catch (e) {
+      console.warn("Ultra compression failed, falling back.");
+    }
+  }
+  
+  // STRATEGY 3: BALANCED (General Binary)
+  // Binaries (EXEs, DATs) have some patterns but are dense. Gzip Level 6 is the sweet spot.
+  else {
+    try {
+      algorithm = 'Gzip (Standard Level 6)';
+      processedData = pako.gzip(rawData, { level: 6 });
+    } catch (e) {
+      algorithm = 'Store (Fallback)';
     }
   }
 
-  // D. STATISTICAL ANOMALY (Quartile Variance)
-  const { q25, q75 } = calculateQuartiles(initialChunk);
-  if ((q75 - q25) > 220) { 
-     score += 25; 
-     reason += "Statistical Anomaly (High Byte Variance); ";
+  // D. PERFORMANCE VALIDATION (The "Regret" Check)
+  // Sometimes compression accidentally makes the file BIGGER (due to headers).
+  // If so, discard the compressed version and send raw.
+  if (processedData.length >= rawData.length) {
+    algorithm = 'Store (Optimization)';
+    processedData = rawData;
   }
+
+  // E. FINAL PACKAGING
+  // We explicitly tag the output type to help the Receiver know it's binary data
+  const resultBlob = new Blob([processedData], { type: 'application/octet-stream' });
 
   return {
-    status: score >= 50 ? 'Suspicious' : 'Safe',
-    score: Math.min(score, 100), // Cap at 100%
-    reason
+    file: resultBlob,
+    meta: {
+      algorithm,
+      originalSize: rawData.length,
+      compressedSize: processedData.length,
+      entropy,
+      securityStatus,
+      riskScore,
+      reason,
+      mimeType: trueType
+    }
   };
-};
-
-// ⚡️ Native Compressor Helper
-const compressStream = async (file: File | Blob, format: 'gzip' | 'deflate'): Promise<Blob> => {
-  const stream = file.stream().pipeThrough(new CompressionStream(format));
-  return await new Response(stream).blob();
-};
-
-// 🤖 Algorithm Predictor
-export const predictAlgorithm = (file: File, entropy: number): string => {
-  if (file.type.startsWith('image/')) return 'Smart WebP (CV)';
-  if (file.type === 'audio/wav' || file.name.endsWith('.wav')) return 'Gzip (Audio)';
-  if (
-    file.type.includes('text') || 
-    file.type.includes('json') || 
-    file.type.includes('javascript') ||
-    file.name.endsWith('.md') || 
-    file.name.endsWith('.log')
-  ) return 'Brotli (Dense)';
-  
-  if (entropy > 7.5 || file.size > 50 * 1024 * 1024) return 'Adaptive Probe';
-
-  return 'Gzip (Universal)';
-};
-
-// 🏭 MAIN PROCESS FUNCTION
-export const processFile = async (file: File): Promise<{ file: File; meta: CompressionMeta }> => {
-  const startTime = performance.now();
-  const originalSize = file.size;
-  
-  // 1. Load Sample for Analysis (First 2MB)
-  const SAMPLE_SIZE = 2 * 1024 * 1024;
-  const slice = file.slice(0, Math.min(file.size, SAMPLE_SIZE));
-  const arrayBuffer = await slice.arrayBuffer();
-  const data = new Uint8Array(arrayBuffer);
-
-  // 2. Run Analysis & Security Scan
-  const entropy = await calculateEntropy(data);
-  const prediction = predictAlgorithm(file, entropy);
-  const security = await scanForThreats(file, data, entropy);
-
-  let meta: CompressionMeta = {
-    algorithm: 'Direct Stream (Raw)', 
-    originalSize,
-    compressedSize: originalSize,
-    entropy,
-    securityStatus: security.status as any,
-    riskScore: security.score,
-    reason: security.reason,
-    timeTaken: 0,
-    recommendation: prediction
-  };
-
-  // --- COMPRESSION BRANCHES ---
-
-  // 1. IMAGES
-  if (prediction.includes('WebP')) {
-    return new Promise((resolve) => {
-      const img = new Image();
-      const url = URL.createObjectURL(file);
-      img.src = url;
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        const MAX_DIM = 1920; 
-        let { width, height } = img;
-        if (width > MAX_DIM || height > MAX_DIM) {
-          const ratio = Math.min(MAX_DIM / width, MAX_DIM / height);
-          width *= ratio; height *= ratio;
-        }
-        canvas.width = width; canvas.height = height;
-        ctx?.drawImage(img, 0, 0, width, height);
-        canvas.toBlob((blob) => {
-          URL.revokeObjectURL(url);
-          if (blob && blob.size < originalSize) {
-            const newFile = new File([blob], file.name.replace(/\.[^/.]+$/, ".webp"), { type: 'image/webp' });
-            meta.compressedSize = blob.size;
-            meta.timeTaken = Math.round(performance.now() - startTime);
-            meta.algorithm = 'Smart WebP';
-            resolve({ file: newFile, meta });
-          } else resolve({ file, meta });
-        }, 'image/webp', 0.80);
-      };
-      img.onerror = () => resolve({ file, meta });
-    });
-  }
-
-  // 2. BROTLI
-  if (prediction.includes('Brotli')) {
-    try {
-      const compressed = await compressStream(file, 'deflate');
-      if (compressed.size < originalSize) {
-        meta.compressedSize = compressed.size;
-        meta.timeTaken = Math.round(performance.now() - startTime);
-        meta.algorithm = 'Brotli';
-        const newFile = new File([compressed], file.name + '.br', { type: 'application/x-brotli' });
-        return { file: newFile, meta };
-      }
-    } catch (e) {}
-  }
-
-  // 3. GZIP (Standard & Adaptive)
-  if (prediction.includes('Gzip') || prediction.includes('Adaptive')) {
-    try {
-      const compressed = await compressStream(file, 'gzip');
-      if (compressed.size < originalSize * 0.95) { // Must save > 5%
-        meta.compressedSize = compressed.size;
-        meta.timeTaken = Math.round(performance.now() - startTime);
-        meta.algorithm = 'Gzip';
-        const newFile = new File([compressed], file.name + '.gz', { type: 'application/gzip' });
-        return { file: newFile, meta };
-      }
-    } catch (e) {}
-  }
-
-  // 4. FALLBACK (Raw)
-  meta.timeTaken = Math.round(performance.now() - startTime);
-  return { file, meta };
 };

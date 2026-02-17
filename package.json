@@ -1,5 +1,7 @@
 {
   "dependencies": {
-    "lucide-react": "^0.564.0"
+    "@types/pako": "^2.0.4",
+    "lucide-react": "^0.564.0",
+    "pako": "^2.1.0"
   }
 }
