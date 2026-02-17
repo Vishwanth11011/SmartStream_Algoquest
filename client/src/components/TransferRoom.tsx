@@ -8,22 +8,15 @@ import { WebRTCManager } from '../lib/webrtc';
 import { processFile } from '../lib/compression'; 
 import { FilePicker } from './FilePicker';
 import { 
-  Cpu, Wifi, Download, Bell, Signal,Play, Activity, Layers, Zap, Terminal, Loader2, Users, LogOut, Search, UserX, ChevronDown, ShieldCheck, Globe, 
+  Cpu, Wifi, Download, Bell, Activity, Layers, Zap, Terminal, Loader2, Users, LogOut, Search, UserX, ChevronDown, ShieldCheck, Globe, 
 } from 'lucide-react';
 import clsx from 'clsx';
 
-// --- DESIGN SYSTEM ---
-const COLORS = {
-  bg: '#0B0F14',
-  surface: '#121826',
-  text: '#E5E7EB',
-  accent: '#3B82F6'
-};
+const COLORS = { bg: '#0B0F14', surface: '#121826', text: '#E5E7EB', accent: '#3B82F6' };
 
 /**
  * 🛠 HELPER: ROBUST MULTI-LAYER RECONSTRUCTION
- * Final stage of the pipeline: Inflates compressed binary data (Gzip/Brotli) 
- * after AES decryption to restore the original file headers.
+ * Inflates compressed binary data (Gzip/Brotli) after AES decryption.
  */
 const decompressBlob = async (blob: Blob, algo: string): Promise<Blob> => {
   try {
@@ -37,8 +30,8 @@ const decompressBlob = async (blob: Blob, algo: string): Promise<Blob> => {
     const decompressedStream = blob.stream().pipeThrough(ds);
     return await new Response(decompressedStream).blob();
   } catch (error) {
-    console.error("Critical Reconstruction Error:", error);
-    return blob; // Fallback to raw bytes if stream inflation fails
+    console.error("Reconstruction Error:", error);
+    return blob; // Fallback to raw bytes
   }
 };
 
@@ -55,8 +48,7 @@ export const TransferRoom = () => {
   // --- IDENTITY & CORE STATUS ---
   const [username] = useState(localStorage.getItem('username') || '');
   const [status, setStatus] = useState('Initializing Systems...');
-  // ✅ FIX: Ensure this is declared to avoid "Cannot find name" error
-  const [,setP2pState] = useState<string>('disconnected');
+  const [, setP2pState] = useState<string>('disconnected');
   
   // --- NETWORKING & DISCOVERY ---
   const [roomId, setRoomId] = useState('');
@@ -85,7 +77,6 @@ export const TransferRoom = () => {
   const [queueStatus, setQueueStatus] = useState(''); 
   const [advancedStats, setAdvancedStats] = useState<any>(null);
 
-  // Terminal logging logic
   const addLog = (msg: string) => setLogs(prev => [...prev.slice(-19), `${new Date().toLocaleTimeString()} - ${msg}`]);
 
   // =========================================
@@ -201,7 +192,7 @@ export const TransferRoom = () => {
   }, [username, navigate, createPeerConnection]);
 
   // =========================================
-  // 3. SEARCH DISCOVERY DEBOUNCE
+  // 3. SEARCH & HANDLERS
   // =========================================
   useEffect(() => {
     const delayDebounceFn = setTimeout(() => {
@@ -215,9 +206,6 @@ export const TransferRoom = () => {
     return () => clearTimeout(delayDebounceFn);
   }, [searchQuery, username]);
 
-  // =========================================
-  // 4. ACTION HANDLERS
-  // =========================================
   const handleJoinRoom = () => {
     if (!roomId) return alert("Enter a valid Room ID");
     socket.emit('join-room', roomId, username);
@@ -295,12 +283,11 @@ export const TransferRoom = () => {
               const ackMsg = JSON.stringify({ type: 'file-ack', name: msg.name });
               // ✅ FIX: Explicitly cast to ArrayBuffer
               const ackBuffer = new TextEncoder().encode(ackMsg);
-              peersRef.current.get(senderId)?.sendData(ackBuffer.buffer);
+              peersRef.current.get(senderId)?.sendData(ackBuffer.buffer as ArrayBuffer);
             });
           }
         } 
         else if (msg.type === 'file-end') {
-          // DELAYED FLUSH: Ensures binary stream flushes before closing pipeline
           setTimeout(() => receiverPipelineRef.current?.finish(), 250);
         }
         else if (msg.type === 'file-ack') {
@@ -313,6 +300,7 @@ export const TransferRoom = () => {
     }
 
     if (receiverPipelineRef.current) {
+      // ✅ FIX: data is already ArrayBuffer
       receiverPipelineRef.current.processChunk(data);
       setProgress(p => (p >= 98 ? 98 : p + 0.5));
     }
@@ -355,12 +343,12 @@ export const TransferRoom = () => {
            setQueueStatus(`Mesh Broadcast: Node ${peerCount}/${activePeers.length}...`);
            setProgress(0);
 
-           // ✅ FIX: Convert Uint8Array to ArrayBuffer for WebRTC compatibility
+           // ✅ FIX: Use .buffer property for metadata
            const startMeta = encoder.encode(JSON.stringify({ type: 'file-start', name: file.name, algo: algoName }));
-           await manager.sendData(startMeta.buffer);
+           await manager.sendData(startMeta.buffer as ArrayBuffer);
 
+           // Stream is piped directly now, no loop here
            await sendFilePipeline(file, sharedKey, algoName, async (chunk) => {
-              // chunk is already ArrayBuffer coming from pipeline.ts
               await manager.sendData(chunk);
               setProgress(p => (p >= 98 ? 98 : p + 0.5));
            });
@@ -369,9 +357,9 @@ export const TransferRoom = () => {
            // @ts-ignore
            while (manager.dataChannel?.bufferedAmount > 0) await new Promise(r => setTimeout(r, 100));
            
-           // ✅ FIX: Convert Uint8Array to ArrayBuffer
+           // ✅ FIX: Use .buffer property for end signal
            const endMeta = encoder.encode(JSON.stringify({ type: 'file-end', name: file.name }));
-           await manager.sendData(endMeta.buffer);
+           await manager.sendData(endMeta.buffer as ArrayBuffer);
            
            addLog(`Waiting for Node ${peerCount} ACK...`);
            await new Promise<void>(resolve => {
@@ -451,7 +439,8 @@ export const TransferRoom = () => {
                      className="flex-1 bg-transparent px-5 py-3 text-white outline-none placeholder:text-gray-600 font-medium" 
                    />
                    <button onClick={handleJoinRoom} className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-8 rounded-xl transition-all shadow-xl shadow-blue-600/20 flex items-center gap-2 uppercase text-xs">
-                     <Play className="w-3 h-3 fill-current" /> Join Room
+                     {/* FIX: Replaced Play icon with generic text to fix missing import if needed */}
+                     <span>▶</span> Join Room
                    </button>
                  </div>
                </div>
@@ -480,7 +469,7 @@ export const TransferRoom = () => {
           {/* HANDSHAKE PANEL */}
           {!isJoined && (
             <div className="bg-[#121826] border border-gray-800 rounded-3xl p-6 shadow-xl relative z-20">
-               <h2 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-3"><Signal className="w-4 h-4 text-blue-400" /> Direct Tunnel Discovery</h2>
+               <h2 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-3"><Users className="w-4 h-4 text-blue-400" /> Direct Tunnel Discovery</h2>
                <div className="relative group">
                   <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5 group-focus-within:text-blue-500 transition-colors" />
                   <input 
@@ -583,7 +572,7 @@ export const TransferRoom = () => {
                  <div className="flex items-center gap-3"><Terminal className="w-4 h-4 text-blue-500" /><span className="text-[10px] font-black text-gray-500 uppercase">Mesh Output Terminal</span></div>
                  <div className="flex gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-red-500/20" /><div className="w-2.5 h-2.5 rounded-full bg-yellow-500/20" /><div className="w-2.5 h-2.5 rounded-full bg-green-500/20 animate-pulse" /></div>
               </div>
-              <div className="flex-1 p-6 font-mono text-[10px] space-y-2 overflow-y-auto custom-scrollbar text-gray-400">
+              <div className="flex-1 p-6 font-mono text-[10px] space-y-2 overflow-y-auto custom-scrollbar text-gray-400 bg-gradient-to-b from-black to-[#05070a]">
                  {logs.map((l, i) => (
                    <motion.div key={i} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} className="flex gap-3 items-start group">
                      <span className="text-blue-500/50">»</span>
@@ -599,13 +588,13 @@ export const TransferRoom = () => {
       {/* OVERLAY PROGRESS */}
       <AnimatePresence>
         {isTransferring && (
-          <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} className="fixed bottom-0 left-0 right-0 bg-[#0B0F14]/95 backdrop-blur-xl border-t border-blue-500/20 p-6 z-50">
-             <div className="max-w-4xl mx-auto">
-               <div className="flex justify-between items-center mb-3">
+          <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} className="fixed bottom-0 left-0 right-0 bg-[#0B0F14]/95 backdrop-blur-xl border-t border-blue-500/20 p-6 z-50 shadow-2xl">
+             <div className="max-w-4xl mx-auto flex flex-col gap-2">
+               <div className="flex justify-between items-center mb-1">
                  <span className="text-[10px] font-black text-blue-400 animate-pulse uppercase tracking-[0.3em]">Mesh Synchronization Sequence</span>
                  <span className="text-[10px] font-mono font-black text-gray-400 bg-gray-800/50 px-3 py-1 rounded-lg">{Math.round(progress)}% DISPATCHED</span>
                </div>
-               <div className="w-full h-2 bg-gray-900 rounded-full overflow-hidden border border-gray-800 shadow-inner">
+               <div className="w-full h-1.5 bg-gray-900 rounded-full overflow-hidden border border-gray-800 shadow-inner">
                  <motion.div className="h-full bg-gradient-to-r from-blue-600 via-cyan-400 to-blue-600" style={{ width: `${progress}%` }} />
                </div>
              </div>
@@ -631,9 +620,9 @@ export const TransferRoom = () => {
 };
 
 const StatCard = ({ label, value, icon: Icon, color }: any) => (
-  <div className="bg-[#121826] border border-gray-800 p-6 rounded-3xl flex flex-col justify-between h-32 hover:border-gray-600 transition-all overflow-hidden relative">
-    <Icon className="absolute top-0 right-0 p-2 opacity-5 w-20 h-20" />
+  <div className="bg-[#121826] border border-gray-800 p-6 rounded-3xl flex flex-col justify-between h-32 hover:border-gray-600 transition-all overflow-hidden relative group">
+    <Icon className="absolute top-0 right-0 p-2 opacity-5 w-20 h-20 group-hover:opacity-10 transition-opacity" />
     <div className="flex items-center justify-between mb-3"><span className="text-[10px] font-black text-gray-500 uppercase tracking-widest leading-none">{label}</span><div className={clsx("p-2 rounded-lg bg-gray-900/50 shadow-inner", color)}><Icon className="w-4 h-4" /></div></div>
-    <span className="text-xl font-black text-gray-200 tracking-tighter tabular-nums">{value}</span>
+    <span className="text-xl font-black text-gray-100 tracking-tighter tabular-nums">{value}</span>
   </div>
 );

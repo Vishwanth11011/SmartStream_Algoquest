@@ -26,7 +26,6 @@ export const sendFilePipeline = async (
     start() { /* No init needed */ },
     
     // Internal buffer to handle leftovers from stream chunks
-    // This is a closure variable for the transformer
     // @ts-ignore: Custom property for buffering
     buffer: new Uint8Array(0),
 
@@ -56,8 +55,6 @@ export const sendFilePipeline = async (
                 const encrypted = await encryptChunk(sharedKey, slice);
                 
                 // TYPE FIX: Ensure we enqueue an ArrayBuffer (or Uint8Array based on need)
-                // The report says to pass the view, but WebRTC needs the buffer.
-                // We normalize to Uint8Array for the controller, then extract buffer for onChunk.
                 const encryptedView = new Uint8Array(encrypted);
                 
                 controller.enqueue(encryptedView); 
@@ -122,7 +119,6 @@ export const sendFilePipeline = async (
  */
 export class ReceiverPipeline {
   private key: CryptoKey;
-  // Warning: In-memory array. For >500MB files, consider FileSystem API (as per report)
   private receivedChunks: ArrayBuffer[] = []; 
   private totalSize = 0;
   private networkSize = 0; 
