@@ -8,7 +8,7 @@ const DESIRED_CHUNK_SIZE = 128 * 1024;
  * Replaces the memory-intensive loop with a constant-memory stream transformer.
  */
 export const sendFilePipeline = async (
-  file: File,
+  file: Blob, // ✅ FIX: Must be 'Blob' to accept compressed data. Do not change to 'File'.
   sharedKey: CryptoKey,
   _algo: string, 
   onChunk: (chunk: ArrayBuffer) => Promise<void>
@@ -18,7 +18,7 @@ export const sendFilePipeline = async (
   let finalSize = 0;
   let badChunks = 0;
 
-  // 1. Get the native readable stream from the File object
+  // 1. Get the native readable stream from the Blob/File
   const sourceStream = file.stream();
 
   // 2. Create a TransformStream to handle buffering and encryption

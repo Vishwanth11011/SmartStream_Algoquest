@@ -335,28 +335,26 @@ export const TransferRoom = () => {
 
     try {
       for (let i = 0; i < files.length; i++) {
-        let file = files[i];
+        const originalFile = files[i];
         setQueueStatus(`Pre-Transfer Security Scan...`);
         
         // 1. Process File (Compression + Security Scan)
-        const { file: processedFile, meta } = await processFile(file);
-        const algoName = algos.get(file.name) || meta.algorithm;
+        const { file: processedData, meta } = await processFile(originalFile);
+        const algoName = algos.get(originalFile.name) || meta.algorithm;
         
         // 2. Set Advanced Stats (Entropy, Risk, etc.) for UI
         setAdvancedStats(meta);
-        
-        file = processedFile; 
 
         // 3. Security Block
         if (meta.securityStatus === 'Suspicious') {
-           alert(`🚫 SECURITY BLOCK TRIGGERED\nFile: ${files[i].name}\nRisk Score: ${meta.riskScore}%\nReason: ${meta.reason}`);
-           addLog(`🚫 Blocked potentially harmful file: ${files[i].name}`);
+           alert(`🚫 SECURITY BLOCK TRIGGERED\nFile: ${originalFile.name}\nRisk Score: ${meta.riskScore}%\nReason: ${meta.reason}`);
+           addLog(`🚫 Blocked potentially harmful file: ${originalFile.name}`);
            continue; 
         }
         
         addLog(`🤖 Intelligence: Applied ${algoName} Strategy`);
-        if (file.size < meta.originalSize) {
-           addLog(`📉 Reduced payload by ${((meta.originalSize - file.size)/1024).toFixed(1)} KB`);
+        if (processedData.size < meta.originalSize) {
+           addLog(`📉 Reduced payload by ${((meta.originalSize - processedData.size)/1024).toFixed(1)} KB`);
         }
 
         const activePeers = Array.from(peersRef.current.entries());
@@ -370,12 +368,15 @@ export const TransferRoom = () => {
            setProgress(0);
 
            // 4. Send Metadata (Start)
-           const startMeta = encoder.encode(JSON.stringify({ type: 'file-start', name: file.name, algo: algoName }));
+           // Use original filename for metadata, even though we send compressed blob
+           const startMeta = encoder.encode(JSON.stringify({ type: 'file-start', name: originalFile.name, algo: algoName }));
            await manager.sendData(startMeta.buffer as ArrayBuffer);
 
            // 5. Send Binary Pipeline (Streaming)
-           // Capture results to show bandwidth stats
-           const transferResult = await sendFilePipeline(file, sharedKey, algoName, async (chunk) => {
+           // ✅ FIX: Force cast processedData (Blob) to any to satisfy 'File' requirement if strictly typed in pipeline.ts
+           // OR ensuring pipeline.ts accepts Blob (which we did above).
+           // The 'as any' is a safety net here if you didn't update pipeline.ts.
+           const transferResult = await sendFilePipeline(processedData as any, sharedKey, algoName, async (chunk) => {
               await manager.sendData(chunk);
               setProgress(p => (p >= 98 ? 98 : p + 0.5));
            });
@@ -392,13 +393,13 @@ export const TransferRoom = () => {
            while (manager.dataChannel?.bufferedAmount > 0) await new Promise(r => setTimeout(r, 100));
            
            // 7. Send Metadata (End)
-           const endMeta = encoder.encode(JSON.stringify({ type: 'file-end', name: file.name }));
+           const endMeta = encoder.encode(JSON.stringify({ type: 'file-end', name: originalFile.name }));
            await manager.sendData(endMeta.buffer as ArrayBuffer);
            
            addLog(`Verifying integrity with Peer ${peerCount}...`);
            await new Promise<void>(resolve => {
               const check = setInterval(() => {
-                 if (lastAckRef.current === file.name) { clearInterval(check); resolve(); }
+                 if (lastAckRef.current === originalFile.name) { clearInterval(check); resolve(); }
               }, 150);
               setTimeout(() => { clearInterval(check); resolve(); }, 10000); 
            });
@@ -407,7 +408,7 @@ export const TransferRoom = () => {
            peerCount++;
         }
 
-        addLog(`✅ Mesh Broadcast Complete: "${file.name}"`);
+        addLog(`✅ Mesh Broadcast Complete: "${originalFile.name}"`);
         setProgress(100);
       }
       setQueueStatus('');
@@ -688,7 +689,6 @@ export const TransferRoom = () => {
                    </motion.div>
                  ))}
                  <div className="animate-pulse text-blue-500 font-black pl-1">_</div>
-                 <div ref={(el) => el?.scrollIntoView({ behavior: 'smooth' })} />
               </div>
            </div>
         </div>
