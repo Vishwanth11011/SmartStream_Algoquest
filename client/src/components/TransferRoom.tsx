@@ -136,7 +136,7 @@ export const TransferRoom = () => {
       addLog("Local Identity ECDH Keys Generated"); 
     });
     
-    socket.emit('register-user', username);
+    socket.emit('register-user', username );
     setStatus('Online');
 
     socket.on('connect', () => { setStatus('Online'); socket.emit('register-user', username); });
