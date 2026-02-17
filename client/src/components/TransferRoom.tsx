@@ -230,7 +230,7 @@ export const TransferRoom = () => {
     if (!roomId) return alert("Please provide a Room ID");
     socket.emit('join-room', roomId, username);
     setIsJoined(true);
-    addLog(`Joined Private Mesh Room: ${roomId}`);
+    addLog(`Joined Private Mesh Room: ${roomId }`);
   } ;
 
   const handleDirectConnect = (targetUsername: string) => {
