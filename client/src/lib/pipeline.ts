@@ -38,7 +38,7 @@ export const sendFilePipeline = async (
             const slice = currentBuffer.slice(offset, offset + DESIRED_CHUNK_SIZE);
             try {
                 const encrypted = await encryptChunk(sharedKey, slice);
-                controller.enqueue(new Uint8Array(encrypted)); 
+                controller.enqueue(encrypted);
                 finalSize += encrypted.byteLength;
             } catch (e) { badChunks++; }
             offset += DESIRED_CHUNK_SIZE;
@@ -53,7 +53,7 @@ export const sendFilePipeline = async (
             try {
                 // @ts-ignore
                 const encrypted = await encryptChunk(sharedKey, this.buffer);
-                controller.enqueue(new Uint8Array(encrypted));
+                controller.enqueue(encrypted);
                 finalSize += encrypted.byteLength;
             } catch (e) { badChunks++; }
         }
@@ -77,7 +77,7 @@ export const sendFilePipeline = async (
 
 export class ReceiverPipeline {
   private key: CryptoKey;
-  private receivedChunks: ArrayBuffer[] = []; 
+  private receivedChunks: Uint8Array[] = []; 
   private totalSize = 0;
   private networkSize = 0; 
   private startTime = performance.now();
@@ -96,7 +96,8 @@ export class ReceiverPipeline {
       try {
         const byteView = new Uint8Array(chunk);
         const decrypted = await decryptChunk(this.key, byteView);
-        this.receivedChunks.push(decrypted);
+        // Convert ArrayBuffer to Uint8Array for proper Blob handling
+        this.receivedChunks.push(new Uint8Array(decrypted));
         this.totalSize += decrypted.byteLength;
       } catch (e) { this.badChunks++; }
     });
@@ -104,7 +105,8 @@ export class ReceiverPipeline {
 
   public async finish() {
     await this.processingQueue;
-    const blob = new Blob(this.receivedChunks);
+    // Blob constructor properly handles array of Uint8Array chunks
+    const blob = new Blob(this.receivedChunks as BlobPart[]);
     const duration = ((performance.now() - this.startTime) / 1000).toFixed(2);
     const speed = (this.totalSize / 1024 / 1024 / (Number(duration) || 1)).toFixed(2);
     this.onFinish(blob, { finalSize: this.networkSize, originalSize: this.totalSize, duration, speed, badChunks: this.badChunks });

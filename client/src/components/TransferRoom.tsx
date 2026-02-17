@@ -12,6 +12,9 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 
+// Type for compression formats supported by DecompressionStream
+type CompressionFormat = 'deflate' | 'gzip';
+
 // --- THEME CONFIGURATION ---
 const COLORS = {
   bg: '#0B0F14',
