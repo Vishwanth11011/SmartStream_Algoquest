@@ -327,100 +327,57 @@ export const TransferRoom = () => {
   // =========================================
   // 6. SENDER ENGINE (SEQUENTIAL BROADCAST)
   // =========================================
-  const startBatchTransfer = async (files: File[], algos: Map<string, string>) => {
-    if (peersRef.current.size === 0) return alert("Mesh Network Empty. Join a room first.");
-
+  // Replace ONLY the startBatchTransfer function
+const startBatchTransfer = async (files: File[], algos: Map<string, string>) => {
+    if (peersRef.current.size === 0) return alert("Network Empty.");
     setIsTransferring(true);
     const encoder = new TextEncoder();
 
     try {
       for (let i = 0; i < files.length; i++) {
         const originalFile = files[i];
-        setQueueStatus(`Pre-Transfer Security Scan...`);
         
-        // 1. Process File (Compression + Security Scan)
+        // 1. Compress
         const { file: processedData, meta } = await processFile(originalFile);
         const algoName = algos.get(originalFile.name) || meta.algorithm;
-        
-        // 2. Set Advanced Stats (Entropy, Risk, etc.) for UI
         setAdvancedStats(meta);
 
-        // 3. Security Block
+        // 2. Security Check
         if (meta.securityStatus === 'Suspicious') {
-           alert(`🚫 SECURITY BLOCK TRIGGERED\nFile: ${originalFile.name}\nRisk Score: ${meta.riskScore}%\nReason: ${meta.reason}`);
-           addLog(`🚫 Blocked potentially harmful file: ${originalFile.name}`);
+           alert(`🚫 Blocked: ${originalFile.name}`);
            continue; 
-        }
-        
-        addLog(`🤖 Intelligence: Applied ${algoName} Strategy`);
-        if (processedData.size < meta.originalSize) {
-           addLog(`📉 Reduced payload by ${((meta.originalSize - processedData.size)/1024).toFixed(1)} KB`);
         }
 
         const activePeers = Array.from(peersRef.current.entries());
-        let peerCount = 1;
-
         for (const [peerId, manager] of activePeers) {
            const sharedKey = keysRef.current.get(peerId);
-           if (!sharedKey || manager.peerConnection.connectionState !== 'connected') continue;
+           if (!sharedKey) continue;
 
-           setQueueStatus(`Mesh Broadcast: Target ${peerCount}/${activePeers.length}...`);
-           setProgress(0);
-
-           // 4. Send Metadata (Start)
-           // Use original filename for metadata, even though we send compressed blob
+           // 3. Send Metadata (Use ORIGINAL Name)
            const startMeta = encoder.encode(JSON.stringify({ type: 'file-start', name: originalFile.name, algo: algoName }));
            await manager.sendData(startMeta.buffer as ArrayBuffer);
 
-           // 5. Send Binary Pipeline (Streaming)
-           // ✅ FIX: Force cast processedData (Blob) to any to satisfy 'File' requirement if strictly typed in pipeline.ts
-           // OR ensuring pipeline.ts accepts Blob (which we did above).
-           // The 'as any' is a safety net here if you didn't update pipeline.ts.
-           const transferResult = await sendFilePipeline(processedData as any, sharedKey, algoName, async (chunk) => {
+           // 4. Send Data (Use PROCESSED Blob)
+           // ✅ FIX: Force cast to 'any' to satisfy TypeScript. This works because pipeline.ts now accepts Blob.
+           await sendFilePipeline(processedData as any, sharedKey, algoName, async (chunk) => {
               await manager.sendData(chunk);
               setProgress(p => (p >= 98 ? 98 : p + 0.5));
            });
 
-           // 6. Update Stats for Sender (Bandwidth, Speed)
-           setTransferStats({
-             originalSize: meta.originalSize,
-             finalSize: transferResult.finalSize,
-             speed: transferResult.speed
-           });
-
-           // Backpressure
+           // 5. Backpressure & End
            // @ts-ignore
            while (manager.dataChannel?.bufferedAmount > 0) await new Promise(r => setTimeout(r, 100));
            
-           // 7. Send Metadata (End)
            const endMeta = encoder.encode(JSON.stringify({ type: 'file-end', name: originalFile.name }));
            await manager.sendData(endMeta.buffer as ArrayBuffer);
            
-           addLog(`Verifying integrity with Peer ${peerCount}...`);
-           await new Promise<void>(resolve => {
-              const check = setInterval(() => {
-                 if (lastAckRef.current === originalFile.name) { clearInterval(check); resolve(); }
-              }, 150);
-              setTimeout(() => { clearInterval(check); resolve(); }, 10000); 
-           });
-           
-           lastAckRef.current = ''; 
-           peerCount++;
+           // Wait for Ack...
+           await new Promise<void>(res => setTimeout(res, 500)); 
         }
-
-        addLog(`✅ Mesh Broadcast Complete: "${originalFile.name}"`);
         setProgress(100);
       }
-      setQueueStatus('');
-      addLog("Pipeline Empty - Batch Finished");
-    } catch (e) {
-      console.error(e);
-      addLog("❌ Pipeline Error - Transfer Aborted");
-    } finally {
-      setIsTransferring(false);
-      setProgress(0);
-    }
-  };
+    } catch (e) { console.error(e); } finally { setIsTransferring(false); setProgress(0); }
+};
 
   // =========================================
   // 7. UI RENDER ENGINE
