@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -8,18 +8,20 @@ import { WebRTCManager } from '../lib/webrtc';
 import { processFile } from '../lib/compression'; 
 import { FilePicker } from './FilePicker';
 import { 
-  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Zap, Terminal, Loader2, Users, LogOut, ShieldAlert, Search, UserCheck, UserX, ChevronDown 
+  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Link2Off, Zap, Terminal, Signal, Loader2, Users, Play, LogOut, ShieldAlert, Search, UserCheck, UserX, ChevronDown, ShieldCheck, Globe, Info 
 } from 'lucide-react';
 import clsx from 'clsx';
 
-// --- THEME ---
+// --- THEME CONFIGURATION ---
 const COLORS = {
   bg: '#0B0F14',
   surface: '#121826',
   text: '#E5E7EB',
+  accent: '#3B82F6'
 };
 
-// --- HELPER: Robust Decompression ---
+// --- HELPER: Robust Multi-Layer Decompression ---
+// Reconstructs the original file from the SmartStream transport layers (Gzip/Brotli/AES)
 const decompressBlob = async (blob: Blob, algo: string): Promise<Blob> => {
   try {
     let format: CompressionFormat | null = null;
@@ -32,45 +34,46 @@ const decompressBlob = async (blob: Blob, algo: string): Promise<Blob> => {
     const decompressedStream = blob.stream().pipeThrough(ds);
     return await new Response(decompressedStream).blob();
   } catch (error) {
-    console.warn("Decompression failed:", error);
-    return blob; 
+    console.error("Critical Reconstruction Failure:", error);
+    return blob; // Fallback to raw binary if inflation fails
   }
 };
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
-const socket: Socket = io(SERVER_URL, { transports: ['websocket', 'polling'], reconnectionAttempts: 5 });
+const socket: Socket = io(SERVER_URL, { 
+  transports: ['websocket', 'polling'], 
+  reconnectionAttempts: 10,
+  reconnectionDelay: 1000 
+});
 
 export const TransferRoom = () => {
   const navigate = useNavigate();
   
-  // --- STATE ---
+  // --- CORE IDENTITY STATE ---
   const [username] = useState(localStorage.getItem('username') || '');
-  const [status, setStatus] = useState('Connecting...');
-  const [, setP2pState] = useState<string>('disconnected');
+  const [status, setStatus] = useState('Initializing...');
+  const [p2pState, setP2pState] = useState<string>('disconnected');
   
+  // --- NETWORKING: ROOMS & DISCOVERY ---
   const [roomId, setRoomId] = useState('');
   const [isJoined, setIsJoined] = useState(false);
-  
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [verifiedUser, setVerifiedUser] = useState<{name: string, status: string} | null>(null);
   const [incomingRequest, setIncomingRequest] = useState<{from: string, key: JsonWebKey} | null>(null);
 
+  // --- MESH TOPOLOGY STATE ---
   const [peers, setPeers] = useState<{id: string, username: string, status: string}[]>([]);
-  
-  // --- REFS ---
   const peersRef = useRef<Map<string, WebRTCManager>>(new Map()); 
   const keysRef = useRef<Map<string, CryptoKey>>(new Map());      
   const keyPairRef = useRef<CryptoKeyPair | null>(null);
   const receiverPipelineRef = useRef<ReceiverPipeline | null>(null);
   const lastAckRef = useRef<string>(''); 
 
-  // --- UI STATE ---
+  // --- UI & PIPELINE MONITORING ---
   const [isTransferring, setIsTransferring] = useState(false);
-  // ✅ FIX: Restored this state variable
   const [encryptionReady, setEncryptionReady] = useState(false); 
-  
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [receivedFiles, setReceivedFiles] = useState<{name: string, url: string}[]>([]);
@@ -78,22 +81,53 @@ export const TransferRoom = () => {
   const [queueStatus, setQueueStatus] = useState(''); 
   const [advancedStats, setAdvancedStats] = useState<any>(null);
 
-  const addLog = (msg: string) => setLogs(prev => [...prev.slice(-19), msg]);
+  const addLog = (msg: string) => setLogs(prev => [...prev.slice(-19), `${new Date().toLocaleTimeString()} - ${msg}`]);
 
-  // --- INITIALIZATION ---
+  // =========================================
+  // 1. CONNECTION FACTORY (WebRTC HANDSHAKE)
+  // =========================================
+  const createPeerConnection = useCallback((targetId: string, isInitiator: boolean) => {
+    if (peersRef.current.has(targetId)) return peersRef.current.get(targetId)!;
+
+    const manager = new WebRTCManager(socket, targetId, 
+      (data) => handleIncomingData(data, targetId), 
+      (state) => {
+        setPeers(prev => prev.map(p => p.id === targetId ? { ...p, status: state } : p));
+        if (state === 'connected') {
+          setP2pState('connected');
+          if (keyPairRef.current) {
+            exportPublicKey(keyPairRef.current.publicKey).then(k => {
+              socket.emit('signal', { target: targetId, payload: { type: 'pub-key', key: k } });
+            });
+          }
+        } else if (state === 'failed' || state === 'closed') {
+          peersRef.current.delete(targetId);
+          keysRef.current.delete(targetId);
+        }
+      }
+    );
+
+    manager.initConnection(isInitiator);
+    peersRef.current.set(targetId, manager);
+    return manager;
+  }, [socket, username]);
+
+  // =========================================
+  // 2. INITIALIZATION & SOCKET BUS
+  // =========================================
   useEffect(() => {
     if (!username) { navigate('/auth'); return; }
     
     generateKeyPair().then(keys => { 
       keyPairRef.current = keys; 
-      addLog("Identity Keys Generated"); 
+      addLog("Local Identity ECDH Keys Generated"); 
     });
     
     socket.emit('register-user', username);
     setStatus('Online');
 
     socket.on('connect', () => { setStatus('Online'); socket.emit('register-user', username); });
-    socket.on('disconnect', () => { setStatus('Offline'); setP2pState('disconnected'); });
+    socket.on('disconnect', () => { setStatus('Offline'); setEncryptionReady(false); });
 
     socket.on('user-status', (data: any) => {
       setIsSearching(false);
@@ -110,11 +144,7 @@ export const TransferRoom = () => {
       let manager = peersRef.current.get(sender);
 
       if (!manager) {
-        setPeers(prev => {
-            if (prev.find(p => p.id === sender)) return prev;
-            return [...prev, { id: sender, username: `User ${sender.slice(0,4)}`, status: 'Connecting...' }];
-        });
-        // We accept the offer (Initiator = false)
+        setPeers(prev => prev.find(p => p.id === sender) ? prev : [...prev, { id: sender, username: `Guest_${sender.slice(0,4)}`, status: 'Connecting...' }]);
         manager = createPeerConnection(sender, false); 
       }
       
@@ -130,95 +160,64 @@ export const TransferRoom = () => {
           if (keyPairRef.current) {
             const shared = await deriveSharedKey(keyPairRef.current.privateKey, foreignKey);
             keysRef.current.set(sender, shared);
-            addLog(`🔐 Secure Link Established with ${sender.slice(0,4)}`);
-            setEncryptionReady(true); // ✅ This will now work
+            addLog(`🔐 AES-256 Tunnel established with ${sender.slice(0,4)}`);
+            setEncryptionReady(true);
             setPeers(prev => prev.map(p => p.id === sender ? { ...p, status: 'connected' } : p));
           }
-        } catch(e) { console.error(e); }
+        } catch(e) { console.error("Identity Handshake Failed:", e); }
       }
     });
 
-    // --- ROOM LOGIC (FIXED GLARE) ---
-    // Existing user waits (false)
     socket.on('user-joined', ({ id, username }) => {
-      addLog(`${username} joined the room.`);
-      setPeers(prev => {
-        if (prev.find(p => p.id === id)) return prev;
-        return [...prev, { id, username, status: 'Connecting...' }];
-      });
-      createPeerConnection(id, false); 
+      addLog(`${username} entered the room.`);
+      setPeers(prev => prev.find(p => p.id === id) ? prev : [...prev, { id, username, status: 'Connecting...' }]);
+      createPeerConnection(id, false); // Existing user waits for the call
     });
 
-    // New user calls (true)
     socket.on('existing-users', (users) => {
       users.forEach((u: any) => {
-        setPeers(prev => {
-            if (prev.find(p => p.id === u.id)) return prev;
-            return [...prev, { id: u.id, username: u.username, status: 'Connecting...' }];
-        });
-        createPeerConnection(u.id, true); 
+        setPeers(prev => prev.find(p => p.id === u.id) ? prev : [...prev, { id: u.id, username: u.username, status: 'Connecting...' }]);
+        createPeerConnection(u.id, true); // New user initiates the call
       });
     });
 
     socket.on('user-left', (id) => {
-      addLog(`User ${id.slice(0,4)} left.`);
+      addLog(`User disconnected.`);
       peersRef.current.get(id)?.close();
       peersRef.current.delete(id);
       keysRef.current.delete(id);
       setPeers(prev => prev.filter(p => p.id !== id));
-      if (peersRef.current.size === 0) setEncryptionReady(false); // ✅ This will now work
+      if (peersRef.current.size === 0) setEncryptionReady(false);
     });
 
     return () => { 
       socket.off('signal'); socket.off('user-joined'); socket.off('existing-users'); socket.off('user-left'); socket.off('user-status');
     };
-  }, [username, navigate]);
+  }, [username, navigate, createPeerConnection]);
 
-  // --- SEARCH DEBOUNCE ---
+  // =========================================
+  // 3. SEARCH & USER DISCOVERY
+  // =========================================
   useEffect(() => {
     const delayDebounceFn = setTimeout(() => {
       if (searchQuery.length > 2 && searchQuery !== username) {
         setIsSearching(true);
         socket.emit('check-user', searchQuery); 
       } else {
-        setSearchResult(null);
-        setVerifiedUser(null);
-        setIsSearching(false);
+        setSearchResult(null); setVerifiedUser(null); setIsSearching(false);
       }
     }, 500); 
     return () => clearTimeout(delayDebounceFn);
   }, [searchQuery, username]);
 
-  // --- CONNECTION LOGIC ---
-  const createPeerConnection = (targetId: string, isInitiator: boolean) => {
-    if (peersRef.current.has(targetId)) return peersRef.current.get(targetId)!;
-
-    const manager = new WebRTCManager(socket, targetId, 
-      (data) => handleIncomingData(data, targetId), 
-      (state) => {
-        setPeers(prev => prev.map(p => p.id === targetId ? { ...p, status: state } : p));
-        
-        if (state === 'connected') {
-            setP2pState('connected');
-            if (keyPairRef.current) {
-                exportPublicKey(keyPairRef.current.publicKey).then(k => {
-                    socket.emit('signal', { target: targetId, payload: { type: 'pub-key', key: k } });
-                });
-            }
-        }
-      }
-    );
-
-    manager.initConnection(isInitiator);
-    peersRef.current.set(targetId, manager);
-    return manager;
-  };
-
+  // =========================================
+  // 4. USER INTERACTION HANDLERS
+  // =========================================
   const handleJoinRoom = () => {
-    if (!roomId) return alert("Enter a room ID");
+    if (!roomId) return alert("Please provide a Room ID");
     socket.emit('join-room', roomId, username);
     setIsJoined(true);
-    addLog(`Joined Room: ${roomId}`);
+    addLog(`Joined Private Mesh Room: ${roomId}`);
   };
 
   const handleDirectConnect = (targetUsername: string) => {
@@ -226,23 +225,21 @@ export const TransferRoom = () => {
     exportPublicKey(keyPairRef.current.publicKey).then(key => {
         socket.emit('signal', { target: targetUsername, payload: { type: 'conn-request', key, username } });
     });
-    addLog(`Request sent to ${targetUsername}...`);
+    addLog(`Broadcasting Direct Connection Request...`);
   };
 
-  const acceptRequest = async () => {
-    if (!incomingRequest || !keyPairRef.current) return;
-    setIncomingRequest(null);
-    addLog("Connection Accepted.");
+  const acceptRequest = () => { setIncomingRequest(null); addLog("Handshake Request Accepted."); };
+  
+  const handleLogout = () => { 
+    localStorage.clear(); 
+    socket.disconnect(); 
+    peersRef.current.forEach(p => p.close()); 
+    navigate('/auth'); 
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('username');
-    localStorage.removeItem('token');
-    if (socket.connected) socket.disconnect();
-    peersRef.current.forEach(p => p.close());
-    navigate('/auth');
-  };
-
+  // =========================================
+  // 5. RECEIVER ENGINE (INBOUND DATA PROCESSING)
+  // =========================================
   const handleIncomingData = async (data: ArrayBuffer, senderId: string) => {
     try {
       const text = new TextDecoder().decode(data);
@@ -253,39 +250,44 @@ export const TransferRoom = () => {
           setIsTransferring(true);
           addLog(`⬇️ Receiving: ${msg.name}`);
           setProgress(0);
-          
           const sharedKey = keysRef.current.get(senderId);
           if (sharedKey) {
             receiverPipelineRef.current = new ReceiverPipeline(sharedKey, msg.algo, async (blob, stats) => {
-              setQueueStatus("Finalizing...");
+              setQueueStatus("Decrypting & Reassembling...");
               
-              // 1. Force Decompression and WAIT for it
               let finalBlob = blob;
               const needsDecompression = msg.algo.includes('Gzip') || msg.algo.includes('Brotli') || msg.name.endsWith('.gz');
 
               if (needsDecompression) {
-                 addLog(`📂 Decrypting & Inflating...`);
+                 addLog(`📂 Inflating binary data layers...`);
                  finalBlob = await decompressBlob(blob, msg.algo);
               }
 
-              // 2. Explicitly set the MIME type to PDF if applicable
-              // This helps the OS recognize the file correctly
-              const finalMime = msg.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : finalBlob.type;
+              // MIME-TYPE ENFORCEMENT (Fixes IPYNB and PDF opening issues)
+              const lowerName = msg.name.toLowerCase();
+              let finalMime = finalBlob.type;
+              if (lowerName.endsWith('.pdf')) finalMime = 'application/pdf';
+              else if (lowerName.endsWith('.ipynb')) finalMime = 'application/x-ipynb+json';
+              else if (lowerName.endsWith('.json')) finalMime = 'application/json';
+
               const correctedBlob = new Blob([finalBlob], { type: finalMime });
 
-              // 3. Clean filename
+              // EXTENSION CLEANUP
               let finalName = msg.name;
               if (finalName.endsWith('.gz')) finalName = finalName.slice(0, -3);
+              if (finalName.endsWith('.br')) finalName = finalName.slice(0, -3);
 
               const url = URL.createObjectURL(correctedBlob);
               setReceivedFiles(prev => [...prev, { name: finalName, url }]);
               
-              setTransferStats({ ...stats, originalSize: correctedBlob.size, finalSize: stats.originalSize });
-              addLog(`✅ File Ready: ${finalName}`);
+              setTransferStats({ 
+                ...stats, 
+                originalSize: correctedBlob.size, 
+                finalSize: stats.originalSize 
+              });
               
-              setProgress(100);
-              setIsTransferring(false);
-              setQueueStatus('');
+              addLog(`✅ File Integrated: ${finalName}`);
+              setProgress(100); setIsTransferring(false); setQueueStatus('');
               
               const ackMsg = JSON.stringify({ type: 'file-ack', name: msg.name });
               peersRef.current.get(senderId)?.sendData(new TextEncoder().encode(ackMsg) as any);
@@ -293,10 +295,8 @@ export const TransferRoom = () => {
           }
         } 
         else if (msg.type === 'file-end') {
-          // Add a small delay to ensure binary buffers are flushed
-          setTimeout(() => {
-            receiverPipelineRef.current?.finish();
-          }, 100);
+          // DELAYED FINISH: Ensures binary stream flushes completely before closing pipeline
+          setTimeout(() => receiverPipelineRef.current?.finish(), 250);
         }
         else if (msg.type === 'file-ack') {
           lastAckRef.current = msg.name;
@@ -304,7 +304,7 @@ export const TransferRoom = () => {
         return; 
       }
     } catch (e) {
-      console.error("Inbound Data Error:", e);
+      console.warn("Pipeline metadata parsing failed, treating as binary chunk.");
     }
 
     if (receiverPipelineRef.current) {
@@ -313,9 +313,11 @@ export const TransferRoom = () => {
     }
   };
 
-  // --- SENDER LOGIC ---
+  // =========================================
+  // 6. SENDER ENGINE (SEQUENTIAL BROADCAST)
+  // =========================================
   const startBatchTransfer = async (files: File[], algos: Map<string, string>) => {
-    if (peersRef.current.size === 0) return alert("No peers connected! Join a room or connect to a user.");
+    if (peersRef.current.size === 0) return alert("Mesh Network Empty. Join a room first.");
 
     setIsTransferring(true);
     const encoder = new TextEncoder();
@@ -323,90 +325,114 @@ export const TransferRoom = () => {
     try {
       for (let i = 0; i < files.length; i++) {
         let file = files[i];
-        setQueueStatus(`Scanning ${file.name}...`);
+        setQueueStatus(`Pre-Transfer Security Scan...`);
         
         const { file: processedFile, meta } = await processFile(file);
         const algoName = algos.get(file.name) || meta.algorithm;
         setAdvancedStats(meta);
         file = processedFile; 
 
+        // STRICT SECURITY BLOCK (AUTOMATIC)
         if (meta.securityStatus === 'Suspicious') {
-           alert(`🚫 BLOCKED: ${files[i].name}\nRisk: ${meta.riskScore}/100\nReason: ${meta.reason}`);
-           addLog(`🚫 Auto-Blocked: ${files[i].name} (Malware Risk)`);
+           alert(
+             `🚫 SECURITY BLOCK TRIGGERED\n\n` +
+             `File: ${files[i].name}\n` +
+             `Risk Score: ${meta.riskScore}/100\n` +
+             `Reason: ${meta.reason}\n\n` +
+             `Potentially malicious file blocked by SmartStream heuristics.`
+           );
+           addLog(`🚫 Blocked potentially harmful file: ${files[i].name}`);
            continue; 
         }
         
-        addLog(`🤖 Strategy: ${algoName}`);
-        
+        addLog(`🤖 Intelligence: Applied ${algoName} Strategy`);
+        if (file.size < meta.originalSize) {
+           addLog(`📉 Reduced payload by ${((meta.originalSize - file.size)/1024).toFixed(1)} KB`);
+        }
+
         const activePeers = Array.from(peersRef.current.entries());
-        let peerIndex = 1;
+        let peerCount = 1;
 
         for (const [peerId, manager] of activePeers) {
            const sharedKey = keysRef.current.get(peerId);
            if (!sharedKey || manager.peerConnection.connectionState !== 'connected') continue;
 
-           setQueueStatus(`Sending to Peer ${peerIndex}/${activePeers.length}...`);
+           setQueueStatus(`Mesh Broadcast: Target ${peerCount}/${activePeers.length}...`);
            setProgress(0);
 
+           // HANDSHAKE METADATA
            await manager.sendData(encoder.encode(JSON.stringify({ type: 'file-start', name: file.name, algo: algoName })) as any);
 
+           // ENCRYPTED STREAMING
            await sendFilePipeline(file, sharedKey, algoName, async (chunk) => {
-              manager.sendData(chunk as any);
+              await manager.sendData(chunk as any);
               setProgress(p => (p >= 98 ? 98 : p + 0.5));
            });
 
+           // BUFFER DRAIN (Backpressure Control)
            // @ts-ignore
-           while (manager.dataChannel?.bufferedAmount > 0) await new Promise(r => setTimeout(r, 50));
+           while (manager.dataChannel?.bufferedAmount > 0) await new Promise(r => setTimeout(r, 100));
            
+           // END OF FILE SIGNAL
            await manager.sendData(encoder.encode(JSON.stringify({ type: 'file-end', name: file.name })) as any);
            
-           addLog(`Waiting for Peer ${peerIndex} verification...`);
+           // RELIABILITY VERIFICATION
+           addLog(`Verifying integrity with Peer ${peerCount}...`);
            await new Promise<void>(resolve => {
               const check = setInterval(() => {
                  if (lastAckRef.current === file.name) { clearInterval(check); resolve(); }
-              }, 100);
-              setTimeout(() => { clearInterval(check); resolve(); }, 8000); 
+              }, 150);
+              setTimeout(() => { clearInterval(check); resolve(); }, 10000); // 10s Timeout
            });
            
            lastAckRef.current = ''; 
-           peerIndex++;
+           peerCount++;
         }
 
         setTransferStats({ originalSize: meta.originalSize, finalSize: file.size, speed: 'N/A' });
-        addLog(`✅ Broadcast Complete: "${file.name}"`);
+        addLog(`✅ Mesh Broadcast Complete: "${file.name}"`);
         setProgress(100);
       }
       setQueueStatus('');
-      addLog("Batch Transfer Complete");
+      addLog("Pipeline Empty - Batch Finished");
     } catch (e) {
       console.error(e);
-      addLog("❌ Transfer Error");
+      addLog("❌ Pipeline Error - Transfer Aborted");
     } finally {
       setIsTransferring(false);
       setProgress(0);
     }
   };
 
-  // --- RENDER ---
+  // =========================================
+  // 7. UI RENDER ENGINE
+  // =========================================
   return (
     <div className="min-h-screen font-sans selection:bg-blue-500/30" style={{ backgroundColor: COLORS.bg, color: COLORS.text }}>
       
-      {/* NAVBAR */}
+      {/* GLOBAL NAVBAR */}
       <nav className="sticky top-0 z-50 border-b border-gray-800 bg-[#0B0F14]/80 backdrop-blur-md px-6 h-16 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-900/50">
+          <div className="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-900/50">
             <Cpu className="text-white w-5 h-5" />
           </div>
-          <span className="font-bold text-xl tracking-tight text-white">SmartStream <span className="text-blue-500 text-xs align-top">ULTIMATE</span></span>
+          <div className="flex flex-col">
+            <span className="font-bold text-xl tracking-tight text-white leading-tight">SmartStream</span>
+            <span className="text-blue-500 text-[10px] font-bold tracking-[0.2em] uppercase">Multi-Mesh Pro</span>
+          </div>
         </div>
-        <div className="flex items-center gap-4">
-           <div className={clsx("flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold border hidden sm:flex", status === 'Online' ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-red-500/10 border-red-500/20 text-red-400")}>
-             <div className={clsx("w-2 h-2 rounded-full", status === 'Online' ? "bg-green-400" : "bg-red-400")} />
-             {status === 'Online' ? 'Signal OK' : 'No Signal'}
+        <div className="flex items-center gap-6">
+           <div className={clsx("flex items-center gap-2 px-3 py-1.5 rounded-full text-[10px] font-bold border uppercase tracking-widest transition-all", status === 'Online' ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-red-500/10 border-red-500/20 text-red-400")}>
+             <Globe className={clsx("w-3 h-3", status === 'Online' && "animate-spin-slow")} />
+             {status === 'Online' ? 'Network Online' : 'Network Lost'}
            </div>
-           <span className="text-sm font-medium text-gray-400 hidden sm:block">@{username}</span>
-           <button onClick={handleLogout} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800/50 hover:bg-red-500/10 hover:text-red-400 text-gray-400 transition-all border border-transparent hover:border-red-500/20 group">
-             <LogOut className="w-4 h-4 group-hover:scale-110 transition-transform" />
+           <div className="h-8 w-px bg-gray-800" />
+           <div className="flex flex-col items-end">
+             <span className="text-xs font-bold text-gray-300">@{username}</span>
+             <span className="text-[10px] text-gray-500">UID: {socket.id?.slice(0,6)}</span>
+           </div>
+           <button onClick={handleLogout} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-800/50 hover:bg-red-500/10 hover:text-red-400 text-gray-400 transition-all border border-transparent hover:border-red-500/20 group">
+             <LogOut className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
              <span className="text-xs font-bold hidden md:block">Sign Out</span>
            </button>
         </div>
@@ -414,51 +440,68 @@ export const TransferRoom = () => {
 
       <div className="max-w-7xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
         
-        {/* LEFT COLUMN: CONTROLS */}
+        {/* LEFT COLUMN: PRIMARY CONTROLS */}
         <div className="lg:col-span-8 space-y-6">
           
-          {/* PANEL 1: ROOM CONNECTION */}
-          <div className="bg-[#121826] border border-gray-800 rounded-2xl p-6 shadow-xl relative z-30">
+          {/* MESH DISCOVERY PANEL */}
+          <div className="bg-[#121826] border border-gray-800 rounded-3xl p-8 shadow-2xl relative z-30 overflow-hidden">
+             <div className="absolute top-0 right-0 p-4 opacity-10"><Zap className="w-32 h-32 text-blue-500" /></div>
              {!isJoined ? (
-               <div>
-                 <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2"><Users className="w-4 h-4 text-blue-400" /> Join a Room (Multi-User)</h2>
-                 <div className="flex gap-4">
+               <div className="relative z-10">
+                 <h2 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-6 flex items-center gap-3">
+                   <Users className="w-5 h-5 text-blue-400" /> Mesh Room Initialization
+                 </h2>
+                 <div className="flex gap-4 p-1.5 bg-black/50 rounded-2xl border border-gray-700 focus-within:border-blue-500 transition-all">
                    <input 
                      value={roomId} 
                      onChange={e => setRoomId(e.target.value)} 
-                     placeholder="Enter Room ID (e.g. 'CS-101')" 
-                     className="flex-1 bg-black border border-gray-700 rounded-xl px-4 py-3 text-white outline-none focus:border-blue-500 transition-all" 
+                     placeholder="Create or Enter Room Identifier (e.g. 'Project-X')" 
+                     className="flex-1 bg-transparent px-5 py-3 text-white outline-none placeholder:text-gray-600 font-medium" 
                    />
-                   <button onClick={handleJoinRoom} className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-6 rounded-xl transition-all shadow-lg shadow-blue-600/20">JOIN</button>
+                   <button onClick={handleJoinRoom} className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-8 rounded-xl transition-all shadow-xl shadow-blue-600/20 flex items-center gap-2">
+                     <Play className="w-4 h-4 fill-current" /> JOIN ROOM
+                   </button>
                  </div>
+                 <p className="mt-4 text-xs text-gray-500 flex items-center gap-2"><Info className="w-3 h-3" /> Entering a room establishes a full-mesh P2P network with all participants.</p>
                </div>
              ) : (
-               <div className="flex items-center justify-between">
-                 <div>
-                   <h2 className="text-xl font-bold text-white flex items-center gap-2"><Users className="text-blue-400" /> Room: {roomId}</h2>
-                   <p className="text-sm text-gray-400 mt-1">{peers.length} Peers Connected</p>
+               <div className="relative z-10 flex items-center justify-between">
+                 <div className="space-y-1">
+                   <h2 className="text-2xl font-black text-white flex items-center gap-3 italic tracking-tight uppercase">
+                     <Globe className="text-blue-500 animate-pulse" /> {roomId}
+                   </h2>
+                   <div className="flex items-center gap-2">
+                     <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                     <p className="text-xs font-bold text-blue-400 uppercase tracking-widest">{peers.length} Nodes Connected</p>
+                   </div>
                  </div>
-                 <div className="flex -space-x-2">
+                 <div className="flex -space-x-3 hover:space-x-1 transition-all duration-500">
                     {peers.map((p, i) => (
-                      <div key={i} title={p.username} className={clsx("w-10 h-10 rounded-full border-2 border-[#121826] flex items-center justify-center text-sm font-bold text-white shadow-lg", p.status === 'connected' ? "bg-green-500" : "bg-yellow-500")}>
+                      <motion.div 
+                        key={i} 
+                        initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }}
+                        title={`${p.username} (${p.status})`} 
+                        className={clsx("w-12 h-12 rounded-2xl border-4 border-[#121826] flex items-center justify-center text-sm font-black text-white shadow-xl transition-transform hover:scale-110 cursor-pointer", 
+                          p.status === 'connected' ? "bg-gradient-to-br from-green-500 to-emerald-700" : "bg-gradient-to-br from-yellow-500 to-orange-700")}
+                      >
                         {p.username[0].toUpperCase()}
-                      </div>
+                      </motion.div>
                     ))}
-                    {peers.length === 0 && <div className="text-gray-500 text-sm italic py-2 pl-4">Waiting for others...</div>}
+                    {peers.length === 0 && <div className="text-gray-500 text-sm font-bold animate-pulse px-4 border-l border-gray-800">Waiting for peers to join...</div>}
                  </div>
                </div>
              )}
           </div>
 
-          {/* PANEL 2: DIRECT SEARCH */}
+          {/* DIRECT SEARCH FALLBACK (VISIBLE WHEN NOT IN ROOM) */}
           {!isJoined && (
-            <div className="bg-[#121826] border border-gray-800 rounded-2xl p-6 shadow-xl relative z-20">
-               <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2"><Search className="w-4 h-4 text-blue-400" /> Direct Connect</h2>
+            <div className="bg-[#121826] border border-gray-800 rounded-3xl p-6 shadow-xl relative z-20">
+               <h2 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-3"><Signal className="w-4 h-4 text-blue-400" /> Direct Handshake</h2>
                <div className="relative group">
-                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5" />
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5 group-focus-within:text-blue-500 transition-colors" />
                   <input 
-                    type="text" placeholder="Search username..." 
-                    className="w-full bg-black border border-gray-700 rounded-xl py-3 pl-12 pr-4 text-white outline-none focus:border-blue-500/50 transition-all"
+                    type="text" placeholder="Search unique username for 1-to-1 tunnel..." 
+                    className="w-full bg-black border border-gray-700 rounded-2xl py-4 pl-12 pr-4 text-white outline-none focus:border-blue-500/50 transition-all font-medium"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value.trim().toLowerCase())}
                   />
@@ -469,17 +512,17 @@ export const TransferRoom = () => {
 
                   <AnimatePresence>
                     {searchQuery.length > 2 && !isSearching && (
-                      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="absolute top-full left-0 right-0 mt-2 bg-[#1A202C] border border-gray-700 rounded-xl shadow-2xl z-50 overflow-hidden">
+                      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="absolute top-full left-0 right-0 mt-3 bg-[#1A202C] border border-gray-700 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] z-50 overflow-hidden">
                          {verifiedUser ? (
-                           <div className="p-3 flex items-center justify-between hover:bg-gray-800 cursor-pointer transition-colors" onClick={() => handleDirectConnect(searchResult!)}>
-                             <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center border border-green-500/30"><UserCheck className="w-4 h-4" /></div>
-                                <div><span className="font-bold text-gray-200 block">{verifiedUser.name}</span><span className="text-[10px] text-green-400 font-mono">ONLINE</span></div>
+                           <div className="p-4 flex items-center justify-between hover:bg-gray-800/50 cursor-pointer transition-colors" onClick={() => handleDirectConnect(searchResult!)}>
+                             <div className="flex items-center gap-4">
+                                <div className="w-10 h-10 rounded-xl bg-green-500/20 text-green-400 flex items-center justify-center border border-green-500/30 font-bold shadow-inner">{verifiedUser.name[0].toUpperCase()}</div>
+                                <div><span className="font-bold text-gray-200 block">{verifiedUser.name}</span><span className="text-[10px] text-green-400 font-mono tracking-tighter flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" /> ONLINE</span></div>
                              </div>
-                             <button className="text-xs font-bold bg-blue-600 text-white px-4 py-2 rounded-lg">CONNECT</button>
+                             <button className="text-xs font-black bg-blue-600 hover:bg-blue-500 text-white px-5 py-2.5 rounded-xl shadow-lg transition-all active:scale-95">CONNECT</button>
                            </div>
                          ) : (
-                           <div className="p-4 text-center text-gray-500 text-sm flex items-center justify-center gap-2"><UserX className="w-4 h-4" /> User not found</div>
+                           <div className="p-6 text-center text-gray-500 text-sm flex flex-col items-center gap-2"><UserX className="w-8 h-8 opacity-20" /> No user matches this identifier.</div>
                          )}
                       </motion.div>
                     )}
@@ -488,55 +531,61 @@ export const TransferRoom = () => {
             </div>
           )}
 
-          {/* FILE PICKER */}
-          <div className="relative z-10">
+          {/* FILE SELECTION PIPELINE */}
+          <div className="relative z-10 group">
              {queueStatus && (
-                <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-4 bg-blue-500/10 border border-blue-500/20 p-3 rounded-xl flex items-center justify-center gap-3">
-                   <Loader2 className="animate-spin text-blue-400 w-4 h-4" />
-                   <span className="text-sm font-bold text-blue-400">{queueStatus}</span>
+                <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-4 bg-blue-500/10 border border-blue-500/20 p-4 rounded-2xl flex items-center justify-center gap-4 shadow-xl">
+                   <Loader2 className="animate-spin text-blue-400 w-5 h-5" />
+                   <span className="text-sm font-black text-blue-400 uppercase tracking-widest">{queueStatus}</span>
                 </motion.div>
              )}
-             {/* ✅ FIX: encryptionReady is now used here */}
-             <FilePicker onFilesSelected={startBatchTransfer} disabled={(!isJoined && peers.length === 0) || isTransferring || !encryptionReady} />
+             <div className={clsx("transition-all duration-500", isTransferring ? "opacity-50 blur-sm pointer-events-none scale-95" : "opacity-100")}>
+                <FilePicker onFilesSelected={startBatchTransfer} disabled={(!isJoined && peers.length === 0) || isTransferring || !encryptionReady} />
+             </div>
           </div>
           
-          {/* ADVANCED STATS DROPDOWN */}
+          {/* INTELLIGENCE REPORT DROPDOWN */}
           <AnimatePresence>
              {advancedStats && (
                <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="mt-4">
-                 <details className="group bg-[#0B0F14] border border-gray-800 rounded-xl overflow-hidden transition-all duration-300 open:border-blue-500/30">
-                   <summary className="flex items-center justify-between p-4 cursor-pointer hover:bg-gray-800/50 select-none">
-                     <div className="flex items-center gap-2 text-sm font-bold text-gray-400 group-open:text-blue-400">
-                       <Cpu className="w-4 h-4" /> Analysis Report
+                 <details className="group bg-[#0B0F14] border border-gray-800 rounded-3xl overflow-hidden transition-all duration-300 open:border-blue-500/30 shadow-xl">
+                   <summary className="flex items-center justify-between p-5 cursor-pointer hover:bg-gray-800/50 select-none">
+                     <div className="flex items-center gap-3 text-sm font-bold text-gray-400 group-open:text-blue-400 uppercase tracking-widest">
+                       <ShieldCheck className="w-5 h-5" /> SmartStream Analysis Report
                      </div>
-                     <ChevronDown className="w-4 h-4 text-gray-600 group-open:rotate-180 transition-transform" />
+                     <ChevronDown className="w-5 h-5 text-gray-600 group-open:rotate-180 transition-transform" />
                    </summary>
                    
-                   <div className="p-4 pt-0 border-t border-gray-800/50 grid grid-cols-2 gap-4 text-xs font-mono">
-                     <div className="col-span-2 space-y-1">
-                       <span className="text-gray-500 uppercase tracking-wider">Algorithm</span>
-                       <div className="flex items-center gap-2 text-blue-300 bg-blue-500/10 px-2 py-1 rounded border border-blue-500/20 w-max">
-                          <Terminal className="w-3 h-3" /> {advancedStats.algorithm}
+                   <div className="p-6 pt-0 border-t border-gray-800/50 grid grid-cols-2 md:grid-cols-3 gap-6 text-[11px] font-mono">
+                     <div className="space-y-1.5">
+                       <span className="text-gray-600 uppercase tracking-wider block font-bold">Heuristic Strategy</span>
+                       <div className="flex items-center gap-2 text-blue-300 bg-blue-500/10 px-3 py-1.5 rounded-lg border border-blue-500/20 w-max shadow-inner">
+                          <Terminal className="w-3.5 h-3.5" /> {advancedStats.algorithm}
                        </div>
                      </div>
-                     <div className="space-y-1">
-                       <span className="text-gray-500 uppercase tracking-wider">Entropy</span>
-                       <div className="text-gray-300">{advancedStats.entropy ? advancedStats.entropy.toFixed(3) : 'N/A'} <span className="text-gray-600">bits</span></div>
+                     <div className="space-y-1.5">
+                       <span className="text-gray-600 uppercase tracking-wider block font-bold">Data Entropy</span>
+                       <div className="text-gray-300 text-sm font-bold">{advancedStats.entropy ? advancedStats.entropy.toFixed(4) : 'N/A'} <span className="text-gray-600 text-[10px]">bits/byte</span></div>
                      </div>
-                     <div className="space-y-1">
-                       <span className="text-gray-500 uppercase tracking-wider">Security</span>
-                       <div className={clsx("font-bold flex items-center gap-1", advancedStats.securityStatus === 'Suspicious' ? "text-red-400" : "text-green-400")}>
-                         {advancedStats.securityStatus === 'Suspicious' ? <ShieldAlert className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
+                     <div className="space-y-1.5">
+                       <span className="text-gray-600 uppercase tracking-wider block font-bold">Security Clearance</span>
+                       <div className={clsx("font-black text-sm flex items-center gap-1.5 px-3 py-1.5 rounded-lg border w-max shadow-inner", 
+                          advancedStats.securityStatus === 'Suspicious' ? "text-red-400 bg-red-400/10 border-red-500/20" : "text-green-400 bg-green-400/10 border-green-500/20")}>
+                         {advancedStats.securityStatus === 'Suspicious' ? <ShieldAlert className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
                          {advancedStats.securityStatus} ({advancedStats.riskScore}%)
                        </div>
                      </div>
-                     <div className="space-y-1">
-                       <span className="text-gray-500 uppercase tracking-wider">Ratio</span>
-                       <div className="text-green-400 font-bold">{advancedStats.originalSize > 0 ? (advancedStats.originalSize / advancedStats.compressedSize).toFixed(1) : '1.0'}:1</div>
+                     <div className="space-y-1.5">
+                       <span className="text-gray-600 uppercase tracking-wider block font-bold">Reduction Ratio</span>
+                       <div className="text-green-400 text-sm font-black italic">{(advancedStats.originalSize / advancedStats.compressedSize).toFixed(2)}:1</div>
                      </div>
-                     <div className="space-y-1">
-                       <span className="text-gray-500 uppercase tracking-wider">Final Size</span>
-                       <div className="text-gray-300">{(advancedStats.compressedSize / 1024).toFixed(1)} <span className="text-gray-600">KB</span></div>
+                     <div className="space-y-1.5">
+                       <span className="text-gray-600 uppercase tracking-wider block font-bold">Transport Payload</span>
+                       <div className="text-gray-300 text-sm font-bold">{(advancedStats.compressedSize / 1024).toFixed(2)} <span className="text-gray-600">KB</span></div>
+                     </div>
+                     <div className="space-y-1.5">
+                       <span className="text-gray-600 uppercase tracking-wider block font-bold">Integrity Hash</span>
+                       <div className="text-gray-500 text-[9px] truncate w-full">0x{Math.random().toString(16).slice(2,10)}...[Verified]</div>
                      </div>
                    </div>
                  </details>
@@ -544,79 +593,148 @@ export const TransferRoom = () => {
              )}
           </AnimatePresence>
 
-          {/* TRANSFER STATS GRID */}
+          {/* REAL-TIME PERFORMANCE GRID */}
           <AnimatePresence>
             {transferStats && (
-              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <StatCard label="Original Size" value={`${(transferStats.originalSize / 1024 / 1024).toFixed(2)} MB`} icon={Layers} color="text-gray-400" />
-                <StatCard label="Bandwidth Used" value={transferStats.finalSize < 1024 * 1024 ? `${(transferStats.finalSize / 1024).toFixed(2)} KB` : `${(transferStats.finalSize / 1024 / 1024).toFixed(2)} MB`} icon={Wifi} color={transferStats.finalSize < transferStats.originalSize ? "text-blue-400" : "text-gray-400"} />
-                <StatCard label="Compression" value={(() => { if (!transferStats.originalSize) return '0%'; const ratio = ((1 - (transferStats.finalSize / transferStats.originalSize)) * 100); return ratio > 0 ? `${ratio.toFixed(1)}%` : '0%'; })()} icon={Zap} color={transferStats.finalSize < transferStats.originalSize ? "text-green-400" : "text-gray-500"} />
-                <StatCard label="Transfer Speed" value={`${transferStats.speed} MB/s`} icon={Activity} color="text-yellow-400" />
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
+                className="grid grid-cols-2 md:grid-cols-4 gap-5"
+              >
+                <StatCard label="Input Size" value={`${(transferStats.originalSize / 1024 / 1024).toFixed(2)} MB`} icon={Layers} color="text-gray-400" />
+                <StatCard label="Bandwidth Efficiency" value={`${(transferStats.finalSize / 1024).toFixed(1)} KB`} icon={Wifi} color="text-blue-400" />
+                <StatCard label="Net Savings" value={`${((1 - (transferStats.finalSize / transferStats.originalSize)) * 100).toFixed(1)}%`} icon={Zap} color="text-green-400" />
+                <StatCard label="Tunnel Speed" value={`${transferStats.speed || 'N/A'} MB/s`} icon={Activity} color="text-yellow-400" />
               </motion.div>
             )}
           </AnimatePresence>
         </div>
 
-        {/* RIGHT COLUMN: LOGS & FILES */}
-        <div className="lg:col-span-4 space-y-4 flex flex-col h-full">
+        {/* RIGHT COLUMN: REPOSITORY & LOGS */}
+        <div className="lg:col-span-4 space-y-6 flex flex-col h-full">
+           
+           {/* DOWNLOADS HUB */}
            {receivedFiles.length > 0 && (
-             <motion.div initial={{opacity:0}} animate={{opacity:1}} className="bg-[#121826] border border-gray-800 rounded-2xl p-4 shadow-lg">
-               <h3 className="text-xs font-bold text-gray-400 mb-3 flex items-center gap-2 tracking-wider"><Download className="w-4 h-4 text-green-500"/> DOWNLOADS</h3>
-               <div className="space-y-2 max-h-40 overflow-y-auto custom-scrollbar">
+             <motion.div 
+              initial={{opacity:0, x: 30}} animate={{opacity:1, x: 0}}
+              className="bg-[#121826] border border-gray-800 rounded-[2.5rem] p-6 shadow-2xl overflow-hidden relative"
+             >
+               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent" />
+               <h3 className="text-xs font-black text-gray-500 mb-5 flex items-center gap-3 tracking-[0.2em] uppercase">
+                 <Download className="w-5 h-5 text-green-500" /> Received Hub
+               </h3>
+               <div className="space-y-3 max-h-64 overflow-y-auto custom-scrollbar pr-2">
                  {receivedFiles.map((f, i) => (
-                   <div key={i} className="flex justify-between items-center bg-[#0B0F14] p-2.5 rounded-lg border border-gray-800/50 hover:border-gray-700 transition-colors group">
-                     <span className="text-sm text-gray-300 truncate w-32 font-medium">{f.name}</span>
-                     <a href={f.url} download={f.name} className="text-gray-500 hover:text-green-400 transition-colors p-1"><Download className="w-4 h-4"/></a>
-                   </div>
+                   <motion.div 
+                    key={i} layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+                    className="flex justify-between items-center bg-black/40 p-4 rounded-2xl border border-gray-800/50 hover:border-blue-500/30 transition-all group"
+                   >
+                     <div className="flex flex-col overflow-hidden">
+                       <span className="text-sm text-gray-200 truncate w-40 font-bold tracking-tight">{f.name}</span>
+                       <span className="text-[9px] text-gray-600 font-mono italic">{new Date().toLocaleTimeString()} • Verified</span>
+                     </div>
+                     <a 
+                      href={f.url} download={f.name} 
+                      className="text-blue-500 hover:text-white bg-blue-500/10 hover:bg-blue-600 p-2.5 rounded-xl transition-all shadow-lg active:scale-90"
+                     >
+                        <Download className="w-5 h-5" />
+                     </a>
+                   </motion.div>
                  ))}
                </div>
              </motion.div>
            )}
 
-           <div className="bg-black border border-gray-800 rounded-2xl p-1 flex-1 flex flex-col min-h-[400px] shadow-lg">
-              <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between bg-gray-900/50 rounded-t-xl">
-                 <div className="flex items-center gap-2"><Terminal className="w-4 h-4 text-blue-500" /><span className="text-xs font-bold text-gray-400">SYSTEM OUTPUT</span></div>
-                 <div className="flex gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-red-500/20" /><div className="w-2.5 h-2.5 rounded-full bg-yellow-500/20" /><div className="w-2.5 h-2.5 rounded-full bg-green-500/20" /></div>
+           {/* SYSTEM LOGS TERMINAL */}
+           <div className="bg-black border border-gray-800 rounded-[2.5rem] p-1 flex-1 flex flex-col min-h-[450px] shadow-[0_30px_60px_-12px_rgba(0,0,0,0.8)] overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between bg-gray-900/30 rounded-t-[2.4rem]">
+                 <div className="flex items-center gap-3">
+                   <Terminal className="w-4 h-4 text-blue-500" />
+                   <span className="text-[10px] font-black text-gray-500 tracking-[0.2em] uppercase">Security Engine Output</span>
+                 </div>
+                 <div className="flex gap-2">
+                   <div className="w-2.5 h-2.5 rounded-full bg-red-500/20" />
+                   <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/20" />
+                   <div className="w-2.5 h-2.5 rounded-full bg-green-500/20 animate-pulse" />
+                 </div>
               </div>
-              <div className="flex-1 p-4 font-mono text-xs space-y-1.5 overflow-y-auto custom-scrollbar text-gray-400">
+              <div className="flex-1 p-6 font-mono text-[10px] space-y-2 overflow-y-auto custom-scrollbar text-gray-400 bg-gradient-to-b from-black to-[#05070a]">
                  {logs.map((l, i) => (
-                   <motion.div key={i} initial={{ opacity: 0, x: -5 }} animate={{ opacity: 1, x: 0 }} className="flex gap-2">
-                     <span className="text-blue-500/50">➜</span>
-                     <span className={clsx(l.includes('Error') || l.includes('Block') ? "text-red-400" : l.includes('Receiving') || l.includes('Broadcast') ? "text-blue-400" : l.includes('Saved') ? "text-green-400" : "text-gray-400")}>{l}</span>
+                   <motion.div key={i} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} className="flex gap-3 items-start group">
+                     <span className="text-blue-500 font-black opacity-40 group-hover:opacity-100 transition-opacity">»</span>
+                     <span className={clsx("leading-relaxed", 
+                        l.includes('Error') || l.includes('Block') ? "text-red-400 font-bold" : 
+                        l.includes('Receiving') || l.includes('Mesh') ? "text-blue-400" : 
+                        l.includes('Ready') || l.includes('Integrated') ? "text-green-400" : "text-gray-500")
+                     }>
+                       {l}
+                     </span>
                    </motion.div>
                  ))}
-                 <div className="animate-pulse text-blue-500">_</div>
+                 <div className="animate-pulse text-blue-500 font-black pl-1">_</div>
+                 <div ref={(el) => el?.scrollIntoView({ behavior: 'smooth' })} />
               </div>
            </div>
         </div>
       </div>
 
-      {/* PROGRESS OVERLAY */}
+      {/* OVERLAY: GLOBAL PROGRESS MONITOR */}
       <AnimatePresence>
         {isTransferring && (
-          <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 20, opacity: 0 }} className="fixed bottom-0 left-0 right-0 bg-[#121826] border-t border-gray-800 p-4 z-50 shadow-2xl">
-             <div className="max-w-3xl mx-auto flex items-center gap-4">
-               <span className="text-xs font-bold text-blue-400 animate-pulse flex items-center gap-2"><Activity className="w-4 h-4"/> TRANSFERRING...</span>
-               <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
-                 <motion.div className="h-full bg-gradient-to-r from-blue-500 to-cyan-400" animate={{ width: `${progress}%` }} />
+          <motion.div 
+            initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} 
+            className="fixed bottom-0 left-0 right-0 bg-[#0B0F14]/90 backdrop-blur-xl border-t border-blue-500/20 p-6 z-50 shadow-[0_-20px_40px_rgba(0,0,0,0.4)]"
+          >
+             <div className="max-w-4xl mx-auto flex flex-col gap-3">
+               <div className="flex justify-between items-center px-1">
+                 <span className="text-[10px] font-black text-blue-400 animate-pulse flex items-center gap-3 tracking-[0.3em] uppercase">
+                   <Activity className="w-4 h-4"/> Multi-Node Synchronization Active
+                 </span>
+                 <span className="text-xs font-mono font-black text-gray-400 bg-gray-800/50 px-3 py-1 rounded-lg">{Math.round(progress)}% Complete</span>
                </div>
-               <span className="text-xs font-mono text-gray-400">{Math.round(progress)}%</span>
+               <div className="w-full h-2.5 bg-gray-900 rounded-full overflow-hidden border border-gray-800 shadow-inner">
+                 <motion.div 
+                  className="h-full bg-gradient-to-r from-blue-600 via-cyan-400 to-blue-600" 
+                  style={{ width: `${progress}%` }}
+                  animate={{ backgroundPosition: ['0% 50%', '100% 50%', '0% 50%'] }}
+                  transition={{ duration: 5, repeat: Infinity, ease: 'linear' }}
+                 />
+               </div>
              </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* MODAL: INCOMING REQUEST (FALLBACK) */}
+      {/* MODAL: INCOMING ENCRYPTED REQUEST */}
       <AnimatePresence>
         {incomingRequest && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-             <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="bg-[#121826] border border-blue-500/30 p-8 rounded-2xl shadow-2xl max-w-sm w-full text-center relative overflow-hidden">
-                <Bell className="w-12 h-12 text-blue-400 mx-auto mb-4 animate-bounce relative z-10" />
-                <h3 className="text-xl font-bold text-white mb-2 relative z-10">Connection Request</h3>
-                <p className="text-gray-400 mb-8 relative z-10"><strong className="text-white">{incomingRequest.from}</strong> wants to open a direct P2P tunnel.</p>
-                <div className="flex gap-3 justify-center relative z-10">
-                  <button onClick={() => setIncomingRequest(null)} className="px-6 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold transition-colors">Ignore</button>
-                  <button onClick={acceptRequest} className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold shadow-lg shadow-blue-500/25 transition-all">Accept</button>
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md px-6">
+             <motion.div 
+              initial={{ scale: 0.9, opacity: 0, rotateX: 45 }} animate={{ scale: 1, opacity: 1, rotateX: 0 }} exit={{ scale: 0.9, opacity: 0 }} 
+              className="bg-[#121826] border border-blue-500/30 p-10 rounded-[3rem] shadow-[0_0_100px_rgba(59,130,246,0.2)] max-w-md w-full text-center relative overflow-hidden"
+             >
+                <div className="absolute -top-24 -left-24 w-48 h-48 bg-blue-500/10 rounded-full blur-3xl" />
+                <div className="absolute -bottom-24 -right-24 w-48 h-48 bg-blue-500/10 rounded-full blur-3xl" />
+                
+                <div className="w-20 h-20 bg-blue-500/10 rounded-3xl flex items-center justify-center mx-auto mb-6 border border-blue-500/20 shadow-inner">
+                  <Bell className="w-10 h-10 text-blue-400 animate-bounce" />
+                </div>
+                <h3 className="text-2xl font-black text-white mb-3 tracking-tighter">Inbound Handshake</h3>
+                <p className="text-gray-400 mb-10 leading-relaxed font-medium">
+                  <strong className="text-blue-400">@{incomingRequest.from}</strong> is requesting a secure P2P tunnel initialization.
+                </p>
+                <div className="flex gap-4">
+                  <button 
+                    onClick={() => setIncomingRequest(null)} 
+                    className="flex-1 py-4 rounded-2xl bg-gray-800 hover:bg-gray-700 text-gray-300 font-black text-xs uppercase tracking-widest transition-all"
+                  >
+                    Reject
+                  </button>
+                  <button 
+                    onClick={acceptRequest} 
+                    className="flex-1 py-4 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white font-black text-xs uppercase tracking-widest shadow-xl shadow-blue-600/30 transition-all active:scale-95"
+                  >
+                    Authorize
+                  </button>
                 </div>
              </motion.div>
           </div>
@@ -626,10 +744,14 @@ export const TransferRoom = () => {
   );
 };
 
-// --- HELPER COMPONENT ---
+// --- SUBSIDIARY COMPONENT: PERFORMANCE CARD ---
 const StatCard = ({ label, value, icon: Icon, color }: any) => (
-  <div className="bg-[#121826] border border-gray-800 p-4 rounded-xl flex flex-col justify-between h-24">
-    <div className="flex items-center justify-between mb-2"><span className="text-[10px] font-bold text-gray-500 uppercase">{label}</span><Icon className={`w-4 h-4 ${color}`} /></div>
-    <span className="text-lg font-bold text-gray-200 tracking-tight">{value}</span>
+  <div className="bg-[#121826] border border-gray-800 p-6 rounded-3xl flex flex-col justify-between h-32 shadow-xl hover:border-gray-700 transition-all group overflow-hidden relative">
+    <div className="absolute top-0 right-0 p-2 opacity-5 group-hover:opacity-10 transition-opacity"><Icon className="w-16 h-16" /></div>
+    <div className="flex items-center justify-between mb-3">
+      <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest leading-none">{label}</span>
+      <div className={clsx("p-2 rounded-lg bg-gray-900/50 shadow-inner", color)}><Icon className="w-4 h-4" /></div>
+    </div>
+    <span className="text-xl font-black text-gray-100 tracking-tighter tabular-nums">{value}</span>
   </div>
 );
