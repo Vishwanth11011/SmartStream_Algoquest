@@ -176,24 +176,32 @@ io.on('connection', (socket) => {
 
   // B. JOIN ROOM (For Multi-Peer Mesh)
   socket.on('join-room', (roomId: string, username: string) => {
+    console.log(`[Server] join-room event received: roomId=${roomId}, username=${username}, socketId=${socket.id}`);
+    
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.username = username;
 
-    if (!roomUsers[roomId]) roomUsers[roomId] = [];
+    if (!roomUsers[roomId]) {
+      roomUsers[roomId] = [];
+      console.log(`[Server] Created new room: ${roomId}`);
+    }
     
     // Add to room list if not already there
     if (!roomUsers[roomId].find(u => u.id === socket.id)) {
         roomUsers[roomId].push({ id: socket.id, username });
+        console.log(`[Server] Added ${username} to room ${roomId}. Room now has ${roomUsers[roomId].length} users`);
     }
 
     console.log(`📢 ${username} joined Room: ${roomId}`);
 
     // 1. Tell everyone else: "New user joined!"
+    const existingUsers = roomUsers[roomId].filter(u => u.id !== socket.id);
+    console.log(`[Server] Broadcasting user-joined to others in room (${existingUsers.length} users will receive)`);
     socket.to(roomId).emit('user-joined', { id: socket.id, username });
 
     // 2. Tell new user: "Here is everyone else!"
-    const existingUsers = roomUsers[roomId].filter(u => u.id !== socket.id);
+    console.log(`[Server] Sending existing-users to ${username}: ${existingUsers.length} users`);
     socket.emit('existing-users', existingUsers);
   });
 
@@ -238,6 +246,24 @@ io.on('connection', (socket) => {
       if (roomUsers[roomId].length === 0) {
         delete roomUsers[roomId];
       }
+    }
+  });
+
+  // F. Connection Request Relay
+  socket.on('connection-request', ({ to, from, roomId }) => {
+    const targetSocketId = usernameToSocket.get(to);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('connection-request', { from, roomId });
+      console.log(`[Server] Relayed connection request from ${from} to ${to} for room ${roomId}`);
+    }
+  });
+
+  // G. Connection Accept Handler
+  socket.on('connection-accept', ({ to, roomId }) => {
+    const targetSocketId = usernameToSocket.get(to);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('connection-accept', { roomId });
+      console.log(`[Server] ${socket.id} accepted connection request, notified ${to} to join room ${roomId}`);
     }
   });
 });
