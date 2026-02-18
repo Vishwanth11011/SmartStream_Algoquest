@@ -370,12 +370,28 @@ export const TransferRoom = () => {
     addLog(`Joined Private Mesh Room: ${idToJoin}`);
   };
 
-  const handleDirectConnect = (targetUsername: string) => {
-    if (!keyPairRef.current) return;
-    exportPublicKey(keyPairRef.current.publicKey).then(key => {
-      socket.emit('signal', { target: targetUsername, payload: { type: 'conn-request', key, username } });
-    });
-    addLog(`Broadcasting Direct Connection Request...`);
+  const handleDirectConnect = async (targetUsername: string) => {
+    try {
+      // Ensure we have a local keypair ready
+      if (!keyPairRef.current) {
+        const keys = await generateKeyPair();
+        keyPairRef.current = keys;
+        addLog("Local Identity ECDH Keys Generated (on-demand)");
+      }
+
+      const cleanTarget = targetUsername.trim().toLowerCase();
+      const pubKey = await exportPublicKey(keyPairRef.current!.publicKey);
+
+      socket.emit('signal', {
+        target: cleanTarget,
+        payload: { type: 'conn-request', key: pubKey, username }
+      });
+
+      addLog(`Broadcasting Direct Connection Request to @${cleanTarget}...`);
+    } catch (e) {
+      console.error("Direct connect failed:", e);
+      addLog("❌ Direct connect failed");
+    }
   };
 
   // ✅ COMPLETE HANDSHAKE LOGIC
