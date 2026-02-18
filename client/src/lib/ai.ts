@@ -36,20 +36,15 @@ export async function analyzeFile(file: File): Promise<string> {
   const inferenceTime = (performance.now() - startTime).toFixed(2);
 
   // 3. FORCED LOGIC
-  // Even if entropy is high (random), we default to 'Gzip' to try and squeeze 
-  // out any remaining patterns (like metadata headers in MP4s).
+  // Use only Gzip and Deflate since browser's DecompressionStream only supports these formats
+  // Brotli is NOT supported by the browser API, so we always use Gzip
   let recommendation = 'Gzip'; 
 
-  // Special Handling: PDFs often benefit from Brotli despite high entropy
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  if (ext === 'pdf') {
-     recommendation = 'Brotli';
-  }
-  // Standard Logic (Modified to be aggressive)
-  else if (entropy < 6.0) {
-     recommendation = 'Brotli'; // Text/Code/Logs -> Aggressive Compression
+  // Special Handling: Text/Code with low entropy can use Deflate for better compression
+  if (entropy < 6.0) {
+     recommendation = 'Deflate'; // Text/Code/Logs -> Better compression ratio
   } else {
-     recommendation = 'Gzip';   // Video/Images -> Fast Compression
+     recommendation = 'Gzip';    // PDFs/Videos/Images -> Fast, compatible compression
   }
 
   // 4. Console Output

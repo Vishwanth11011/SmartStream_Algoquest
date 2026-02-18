@@ -125,7 +125,8 @@ export class ReceiverPipeline {
     console.log(`[Pipeline] Blob created - size: ${blob.size} bytes`);
     
     const duration = ((performance.now() - this.startTime) / 1000).toFixed(2);
-    const speed = (this.totalSize / 1024 / 1024 / (Number(duration) || 1)).toFixed(2);
+    // Calculate speed based on networkSize (actual bytes transferred) for consistency with sender
+    const speed = (this.networkSize / 1024 / 1024 / (Number(duration) || 1)).toFixed(2);
     
     console.log(`[Pipeline] Finish stats - duration: ${duration}s, speed: ${speed}MB/s`);
     this.onFinish(blob, { finalSize: this.networkSize, originalSize: this.totalSize, duration, speed, badChunks: this.badChunks });

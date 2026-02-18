@@ -6,7 +6,9 @@ import { generateKeyPair, exportPublicKey, importPublicKey, deriveSharedKey } fr
 import { sendFilePipeline, ReceiverPipeline } from '../lib/pipeline';
 import { WebRTCManager } from '../lib/webrtc';
 import { processFile } from '../lib/compression';
+import { getCompressionStats } from '../lib/stats';
 import { FilePicker } from './FilePicker';
+import { TransferProgressStages, type TransferStage } from './TransferProgressStages';
 import {
   Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Zap, Terminal, Signal, Loader2, Users, Play, LogOut, ShieldAlert, Search, UserX, ChevronDown, ShieldCheck, Globe, Info
 } from 'lucide-react';
@@ -29,9 +31,11 @@ const COLORS = {
  */
 const decompressBlob = async (blob: Blob, algo: string, fileName: string): Promise<Blob> => {
   try {
+    console.log(`[Decompress] STARTING - algo: "${algo}", fileName: "${fileName}", blob size: ${blob.size}`);
+    
     // 1. If logic said "Store", we do NOT decompress
     if (algo.startsWith('Store')) {
-      console.log(`[Decompression] Skipping decompression - Store algo, blob size: ${blob.size}`);
+      console.log(`[Decompress] Detected Store algo - returning blob as-is`);
       return blob;
     }
 
@@ -40,36 +44,61 @@ const decompressBlob = async (blob: Blob, algo: string, fileName: string): Promi
     // 2. Check Explicit Algorithm Label
     if (algo.includes('Deflate')) {
         format = 'deflate';
+        console.log(`[Decompress] Matched "Deflate" - using deflate`);
     }
     else if (algo.includes('Gzip')) {
         format = 'gzip';
+        console.log(`[Decompress] Matched "Gzip" - using gzip`);
     }
     // 3. Fallback: Extension
     else if (fileName.endsWith('.gz')) {
         format = 'gzip';
+        console.log(`[Decompress] Matched .gz extension - using gzip`);
     }
 
     if (!format) {
-      console.log(`[Decompression] No matching format found for algo: ${algo}, returning blob as-is`);
+      console.log(`[Decompress] NO FORMAT MATCHED for algo: "${algo}"`);
       return blob;
     }
 
-    console.log(`[Decompression] Starting ${format} decompression, input size: ${blob.size} bytes`);
+    console.log(`[Decompress] Using format: ${format}, input size: ${blob.size} bytes`);
     
-    const ds = new DecompressionStream(format);
-    const decompressedStream = blob.stream().pipeThrough(ds);
-    const decompressedBlob = await new Response(decompressedStream).blob();
+    // Get the raw blob data first to verify it's not empty
+    const blobBuffer = await blob.arrayBuffer();
+    console.log(`[Decompress] Blob buffer size: ${blobBuffer.byteLength} bytes`);
     
-    console.log(`[Decompression] Success! Output size: ${decompressedBlob.size} bytes`);
-    return decompressedBlob;
+    if (blobBuffer.byteLength === 0) {
+      console.error(`[Decompress] ERROR: Received empty blob! Cannot decompress.`);
+      return blob;
+    }
+    
+    try {
+      console.log(`[Decompress] Creating DecompressionStream with format: ${format}`);
+      const ds = new DecompressionStream(format);
+      const decompressedStream = blob.stream().pipeThrough(ds);
+      const decompressedBlob = await new Response(decompressedStream).blob();
+      
+      console.log(`[Decompress] SUCCESS! Decompressed size: ${decompressedBlob.size} bytes`);
+      
+      if (decompressedBlob.size === 0) {
+        console.error(`[Decompress] ERROR: Decompression produced empty blob!`);
+        return blob;
+      }
+      
+      return decompressedBlob;
+    } catch (decompressError) {
+      console.error(`[Decompress] DecompressionStream FAILED:`, decompressError);
+      console.log(`[Decompress] Returning original blob as fallback`);
+      return blob;
+    }
   } catch (error) {
-    console.error("CRITICAL: Decompression Failed.", error, "Returning original blob");
-    console.error("Blob details - Size:", blob.size, "Type:", blob.type, "Algo:", algo, "File:", fileName);
-    return blob; // Return raw if decompression fails (safety net)
+    console.error("[Decompress] CRITICAL ERROR:", error);
+    console.error("[Decompress] Algo:", algo, "File:", fileName, "Blob size:", blob.size);
+    return blob;
   }
 };
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'https://smartstream-algoquest.onrender.com';
 const socket: Socket = io(SERVER_URL, {
   transports: ['websocket', 'polling'],
   reconnectionAttempts: 10,
@@ -112,6 +141,8 @@ export const TransferRoom = () => {
   const [transferStats, setTransferStats] = useState<any>(null);
   const [queueStatus, setQueueStatus] = useState('');
   const [advancedStats, setAdvancedStats] = useState<any>(null);
+  const [transferStage, setTransferStage] = useState<TransferStage>('idle');
+  const [currentFileName, setCurrentFileName] = useState('');
 
   // Terminal Logger
   const addLog = (msg: string) => setLogs(prev => [...prev.slice(-19), `${new Date().toLocaleTimeString()} - ${msg}`]);
@@ -120,28 +151,38 @@ export const TransferRoom = () => {
   // 1. CONNECTION FACTORY (WebRTC HANDSHAKE)
   // =========================================
   const createPeerConnection = useCallback((targetId: string, isInitiator: boolean) => {
-    if (peersRef.current.has(targetId)) return peersRef.current.get(targetId)!;
+    console.log(`[createPeerConnection] Creating ${isInitiator ? 'INITIATOR' : 'NON-INITIATOR'} connection to ${targetId}`);
+    
+    if (peersRef.current.has(targetId)) {
+      console.log(`[createPeerConnection] Connection already exists for ${targetId}`);
+      return peersRef.current.get(targetId)!;
+    }
 
     const manager = new WebRTCManager(socket, targetId,
       (data) => handleIncomingData(data, targetId),
       (state) => {
+        console.log(`[WebRTC] State change for ${targetId}: ${state}`);
         setPeers(prev => prev.map(p => p.id === targetId ? { ...p, status: state } : p));
         if (state === 'connected') {
           setP2pState('connected');
           if (keyPairRef.current) {
             exportPublicKey(keyPairRef.current.publicKey).then(k => {
+              console.log(`[WebRTC] Sending pub-key to ${targetId}`);
               socket.emit('signal', { target: targetId, payload: { type: 'pub-key', key: k } });
             });
           }
         } else if (state === 'failed' || state === 'closed') {
+          console.log(`[WebRTC] Closing connection to ${targetId}`);
           peersRef.current.delete(targetId);
           keysRef.current.delete(targetId);
         }
       }
     );
 
+    console.log(`[createPeerConnection] Initializing connection, isInitiator=${isInitiator}`);
     manager.initConnection(isInitiator);
     peersRef.current.set(targetId, manager);
+    console.log(`[createPeerConnection] Connection created and stored, total managers: ${peersRef.current.size}`);
     return manager;
   }, [socket, username]);
 
@@ -179,9 +220,16 @@ export const TransferRoom = () => {
       if (!manager) {
         setPeers(prev => prev.find(p => p.id === sender) ? prev : [...prev, { id: sender, username: `Guest_${sender.slice(0, 4)}`, status: 'Connecting...' }]);
         manager = createPeerConnection(sender, false);
+        // Ensure manager is properly initialized before handling signal
+        if (!manager) {
+          console.error(`Failed to create peer connection for ${sender}`);
+          return;
+        }
       }
 
-      if (manager) await manager.handleSignal(payload);
+      if (manager) {
+        await manager.handleSignal(payload);
+      }
 
       // ✅ CAPTURE SENDER ID HERE
       if (payload.type === 'conn-request') {
@@ -207,15 +255,24 @@ export const TransferRoom = () => {
     });
 
     socket.on('user-joined', ({ id, username }) => {
+      console.log(`[Socket] User joined: ${username} (${id})`);
       addLog(`${username} entered the mesh.`);
       setPeers(prev => prev.find(p => p.id === id) ? prev : [...prev, { id, username, status: 'Connecting...' }]);
-      createPeerConnection(id, false);
+      const manager = createPeerConnection(id, false);
+      if (!manager) {
+        console.error(`Failed to create peer connection for new user ${id}`);
+      }
     });
 
     socket.on('existing-users', (users) => {
+      console.log(`[Socket] Existing users received: ${users.length} users`);
       users.forEach((u: any) => {
+        console.log(`[Socket] Creating initiator connection to ${u.username} (${u.id})`);
         setPeers(prev => prev.find(p => p.id === u.id) ? prev : [...prev, { id: u.id, username: u.username, status: 'Connecting...' }]);
-        createPeerConnection(u.id, true);
+        const manager = createPeerConnection(u.id, true);
+        if (!manager) {
+          console.error(`Failed to create peer connection for existing user ${u.id}`);
+        }
       });
     });
 
@@ -229,7 +286,13 @@ export const TransferRoom = () => {
     });
 
     return () => {
-      socket.off('signal'); socket.off('user-joined'); socket.off('existing-users'); socket.off('user-left'); socket.off('user-status');
+      socket.off('signal');
+      socket.off('user-joined');
+      socket.off('existing-users');
+      socket.off('user-left');
+      socket.off('user-status');
+      socket.off('connect');
+      socket.off('disconnect');
     };
   }, [username, navigate, createPeerConnection]);
 
@@ -253,6 +316,7 @@ export const TransferRoom = () => {
   // =========================================
   const handleJoinRoom = () => {
     if (!roomId) return alert("Please provide a Room ID");
+    console.log(`[Room] Attempting to join room: ${roomId} as user: ${username}`);
     socket.emit('join-room', roomId, username);
     setIsJoined(true);
     addLog(`Joined Private Mesh Room: ${roomId}`);
@@ -322,33 +386,59 @@ export const TransferRoom = () => {
       if (text.trim().startsWith('{')) {
         const msg = JSON.parse(text);
 
-        if (msg.type === 'file-start') {
-          setIsTransferring(true);
+        if (msg.type === 'file-start') {          console.log(`[Receiver] Received file-start metadata:`, msg);          
+        setIsTransferring(true);
+          setCurrentFileName(msg.name);
+          setTransferStage('transferred');
           addLog(`⬇️ Receiving: ${msg.name}`);
           setProgress(0);
           const sharedKey = keysRef.current.get(senderId);
           if (sharedKey) {
             receiverPipelineRef.current = new ReceiverPipeline(sharedKey, msg.algo, async (blob, stats) => {
+              setTransferStage('decrypting');
               setQueueStatus("Decrypting & Reassembling...");
 
               try {
                 console.log(`[Receiver] Received blob - size: ${blob.size}, algo: ${msg.algo}, name: ${msg.name}`);
 
-                // 1. Decompress the received (decrypted) blob
+                // 1. Verify received blob is not empty
+                if (blob.size === 0) {
+                  console.error(`[Receiver] ERROR: Received empty blob! Cannot process file.`);
+                  addLog(`❌ Received corrupted file (empty blob)`);
+                  setIsTransferring(false);
+                  setQueueStatus('');
+                  return;
+                }
+
+                setTransferStage('decrypted');
+
+                // 2. Decompress the received (decrypted) blob
+                setTransferStage('decompressing');
                 const decompressedBlob = await decompressBlob(blob, msg.algo, msg.name);
+                setTransferStage('decompressed');
                 console.log(`[Receiver] After decompression - size: ${decompressedBlob.size}`);
 
-                // 2. Get original file data as bytes to verify integrity
+                // 3. Verify decompression didn't return empty blob
+                if (decompressedBlob.size === 0) {
+                  console.error(`[Receiver] ERROR: Decompression resulted in empty blob!`);
+                  addLog(`❌ File decompression failed - corrupted data`);
+                  setIsTransferring(false);
+                  setQueueStatus('');
+                  return;
+                }
+
+                // 4. Get original file data as bytes to verify integrity
                 const arrayBuffer = await decompressedBlob.arrayBuffer();
                 const uint8array = new Uint8Array(arrayBuffer);
                 console.log(`[Receiver] Decompressed data verified - ${uint8array.length} bytes`);
 
-                // 3. MIME-TYPE ENFORCEMENT - Set correct MIME type based on file extension
+                // 5. MIME-TYPE ENFORCEMENT - Set correct MIME type based on file extension
                 const lowerName = msg.name.toLowerCase();
                 let finalMime = 'application/octet-stream';
                 
                 if (lowerName.endsWith('.pdf')) {
                   finalMime = 'application/pdf';
+                  console.log(`[Receiver] Detected PDF file - MIME type: ${finalMime}`);
                 } else if (lowerName.endsWith('.ipynb')) {
                   finalMime = 'application/x-ipynb+json';
                 } else if (lowerName.endsWith('.json')) {
@@ -364,21 +454,27 @@ export const TransferRoom = () => {
                 }
 
                 const correctedBlob = new Blob([uint8array], { type: finalMime });
+                console.log(`[Receiver] Final blob created - size: ${correctedBlob.size}, mime: ${finalMime}`);
 
-
-                // 5. Extension Cleanup - Remove compression extensions
+                // 6. Extension Cleanup - Remove compression extensions
                 const finalName = msg.name.replace(/\.gz$/, "").replace(/\.br$/, "").replace(/\.deflate$/, "");
                 const url = URL.createObjectURL(correctedBlob);
                 
                 setReceivedFiles(prev => [...prev, { name: finalName, url }]);
+                setTransferStage('complete');
                 console.log(`[Receiver] File ready for download: ${finalName}`);
 
-                // 6. Update Stats
+                // 7. Update Stats with compression percentage
+                // Use msg.originalSize (sent by sender) as the original file size
+                // blob.size is the compressed (but decrypted) file size
+                const senderOriginalSize = msg.originalSize || correctedBlob.size;
+                const receiverStats = getCompressionStats(senderOriginalSize, blob.size);
                 setTransferStats({
                   ...stats,
-                  originalSize: correctedBlob.size, // Actual size after decompression
-                  finalSize: stats.originalSize,    // Size received over network
-                  compressionRatio: (correctedBlob.size / (stats.originalSize || 1)).toFixed(2)
+                  originalSize: senderOriginalSize, // Original file size from sender
+                  finalSize: blob.size,              // Size after decryption (compressed)
+                  compressionPercent: receiverStats.compressionPercent,
+                  compressionRatio: receiverStats.compressionRatio
                 });
 
                 addLog(`✅ File Integrated: ${finalName}`);
@@ -386,7 +482,7 @@ export const TransferRoom = () => {
                 setIsTransferring(false);
                 setQueueStatus('');
                 
-                // 7. Send acknowledgment
+                // 8. Send acknowledgment
                 const ackMsg = JSON.stringify({ type: 'file-ack', name: msg.name });
                 const ackBuffer = new TextEncoder().encode(ackMsg);
                 peersRef.current.get(senderId)?.sendData(ackBuffer.buffer as ArrayBuffer);
@@ -420,7 +516,7 @@ export const TransferRoom = () => {
   // =========================================
   // 6. SENDER ENGINE (SEQUENTIAL BROADCAST)
   // =========================================
-  const startBatchTransfer = async (files: File[], algos: Map<string, string>) => {
+  const startBatchTransfer = async (files: File[]) => {
     if (peersRef.current.size === 0) return alert("Mesh Network Empty. Join a room first.");
 
     setIsTransferring(true);
@@ -429,11 +525,23 @@ export const TransferRoom = () => {
     try {
       for (let i = 0; i < files.length; i++) {
         const originalFile = files[i];
+        setCurrentFileName(originalFile.name);
+        setTransferStage('algo-selected');
         setQueueStatus(`Pre-Transfer Security Scan...`);
 
         // 1. Process File (Forced Compression)
+        setTransferStage('compressing');
         const { file: processedData, meta } = await processFile(originalFile);
-        const algoName = algos.get(originalFile.name) || meta.algorithm;
+        setTransferStage('compressed');
+        // IMPORTANT: Always use the algorithm that was actually used for compression (meta.algorithm)
+        // Do NOT override with analyzeFile recommendation, as that could cause mismatch between
+        // what was actually compressed vs what we tell the receiver to decompress with
+        const algoName = meta.algorithm;
+        
+        console.log(`[Sender] File: ${originalFile.name}`);
+        console.log(`[Sender] Meta algorithm from processFile: ${meta.algorithm}`);
+        console.log(`[Sender] Final algorithm to use: ${algoName}`);
+        console.log(`[Sender] Original size: ${meta.originalSize}, Compressed size: ${meta.compressedSize}`);
 
         // 2. Set Stats
         setAdvancedStats(meta);
@@ -452,27 +560,35 @@ export const TransferRoom = () => {
 
         for (const [peerId, manager] of activePeers) {
           const sharedKey = keysRef.current.get(peerId);
-          if (!sharedKey || manager.peerConnection.connectionState !== 'connected') continue;
+          if (!sharedKey || !manager.dataChannel || manager.dataChannel.readyState !== 'open') continue;
 
           setQueueStatus(`Mesh Broadcast: Target ${peerCount}/${activePeers.length}...`);
           setProgress(0);
 
-          // 4. Send Metadata
-          const startMeta = encoder.encode(JSON.stringify({ type: 'file-start', name: originalFile.name, algo: algoName }));
+          // 4. Send Metadata (with original file size for compression percentage calculation)
+          setTransferStage('encrypting');
+          const metaObj = { type: 'file-start', name: originalFile.name, algo: algoName, originalSize: meta.originalSize };
+          console.log(`[Sender] Sending file-start metadata:`, metaObj);
+          const startMeta = encoder.encode(JSON.stringify(metaObj));
           await manager.sendData(startMeta.buffer as ArrayBuffer);
+          setTransferStage('encrypted');
 
           // 5. Send Binary Pipeline
+          setTransferStage('transferring');
           const transferResult = await sendFilePipeline(processedData as any, sharedKey, algoName, async (chunk) => {
             await manager.sendData(chunk);
             setProgress(p => (p >= 98 ? 98 : p + 0.5));
           });
+          setTransferStage('transferred');
 
-          // 6. Update Stats for Sender (Pure Compression Ratio)
+          // 6. Update Stats for Sender (Using unified compression stats utility)
+          const stats = getCompressionStats(meta.originalSize, meta.compressedSize);
           setTransferStats({
-            originalSize: meta.originalSize,
-            finalSize: meta.compressedSize, 
+            originalSize: stats.originalSize,
+            finalSize: stats.compressedSize, 
             speed: transferResult.speed,
-            compressionRatio: (meta.originalSize / meta.compressedSize).toFixed(2)
+            compressionPercent: stats.compressionPercent,
+            compressionRatio: stats.compressionRatio
           });
 
           // Backpressure
@@ -681,8 +797,8 @@ export const TransferRoom = () => {
                       </div>
                     </div>
                     <div className="space-y-1.5">
-                      <span className="text-gray-600 uppercase tracking-wider block font-bold">Reduction Ratio</span>
-                      <div className="text-green-400 text-sm font-black italic">{(advancedStats.originalSize / advancedStats.compressedSize).toFixed(2)}:1</div>
+                      <span className="text-gray-600 uppercase tracking-wider block font-bold">Compression Percentage</span>
+                      <div className="text-green-400 text-sm font-black italic">{((1 - advancedStats.compressedSize / advancedStats.originalSize) * 100).toFixed(2)}%</div>
                     </div>
                     <div className="space-y-1.5">
                       <span className="text-gray-600 uppercase tracking-wider block font-bold">Transport Payload</span>
@@ -707,7 +823,7 @@ export const TransferRoom = () => {
               >
                 <StatCard label="Input Size" value={`${(transferStats.originalSize / 1024 / 1024).toFixed(2)} MB`} icon={Layers} color="text-gray-400" />
                 <StatCard label="Bandwidth Efficiency" value={`${(transferStats.finalSize / 1024).toFixed(1)} KB`} icon={Wifi} color="text-blue-400" />
-                <StatCard label="Compression" value={`${transferStats.compressionRatio}:1`} icon={Zap} color="text-green-400" />
+                <StatCard label="Compression" value={`${transferStats.compressionPercent}%`} icon={Zap} color="text-green-400" />
                 <StatCard label="Tunnel Speed" value={`${transferStats.speed || 'N/A'} MB/s`} icon={Activity} color="text-yellow-400" />
               </motion.div>
             )}
@@ -847,6 +963,17 @@ export const TransferRoom = () => {
           </div>
         )}
       </AnimatePresence>
+
+      {/* PROGRESS TRACKER - Bottom Position */}
+      {isTransferring && transferStage !== 'idle' && (
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-gray-900/90 border border-gray-700/50 p-5 rounded-2xl backdrop-blur z-50 max-w-[85vw]">
+          <TransferProgressStages 
+            currentStage={transferStage}
+            isReceiver={receiverPipelineRef.current !== null}
+            fileName={currentFileName}
+          />
+        </motion.div>
+      )}
     </div>
   );
 };

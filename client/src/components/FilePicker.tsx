@@ -8,7 +8,7 @@ import { analyzeFile } from '../lib/ai';
 const SERVER_URL = (import.meta.env.VITE_API_BASE as string) || (import.meta.env.VITE_SERVER_URL as string) || 'https://smartstream-algoquest.onrender.com' || 'http://localhost:3001';
 
 interface FilePickerProps {
-  onFilesSelected: (files: File[], algos: Map<string, string>) => void;
+  onFilesSelected: (files: File[]) => void;
   disabled?: boolean;
 }
 
@@ -35,8 +35,6 @@ export const FilePicker: React.FC<FilePickerProps> = ({ onFilesSelected, disable
         throw new Error(`Batch too large! Limit is 1GB. (Selected: ${(totalSize / 1024 / 1024 / 1024).toFixed(2)} GB)`);
       }
 
-      const algoMap = new Map<string, string>();
-
       // 2. SEQUENTIAL AI ANALYSIS (Analyze one by one)
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
@@ -44,7 +42,8 @@ export const FilePicker: React.FC<FilePickerProps> = ({ onFilesSelected, disable
 
         // A. Client-Side Entropy (Using restored ai.ts)
         const recommendation = await analyzeFile(file);
-        algoMap.set(file.name, recommendation);
+        // NOTE: We no longer use this recommendation for actual compression.
+        // The compression algorithm is determined by processFile() based on file characteristics.
 
         // B. Generate Vector (1KB Sample for Backend Logs)
         const sampleBuffer = await file.slice(0, 1024).arrayBuffer();
@@ -75,7 +74,9 @@ export const FilePicker: React.FC<FilePickerProps> = ({ onFilesSelected, disable
       setStatus('idle');
       
       // Pass valid batch to parent
-      onFilesSelected(files, algoMap);
+      // NOTE: We no longer pass the algoMap because the actual compression algorithm
+      // used by processFile() should be sent to the receiver, not the AI recommendation
+      onFilesSelected(files);
       
       // Reset input
       if (fileInputRef.current) fileInputRef.current.value = '';

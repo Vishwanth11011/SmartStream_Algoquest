@@ -92,11 +92,67 @@ export const processFile = async (file: File): Promise<{ file: Blob, meta: FileM
   let riskScore = 0;
   let reason = 'Standard File';
 
-  // --- SECURITY CHECK ---
-  if ((file.name.endsWith('.txt') || file.name.endsWith('.js')) && entropy > CONFIG.RANSOMWARE_THRESHOLD) {
+  // --- ENHANCED SECURITY CHECK (Malware Detection) ---
+  
+  // 1. CHECK FOR DANGEROUS EXECUTABLE EXTENSIONS
+  const dangerousExtensions = ['.exe', '.dll', '.sys', '.scr', '.bat', '.cmd', '.com', '.msi', '.sh', '.bash', '.zsh', '.ps1', '.psd1', '.psm1', '.psc1', '.jar', '.app', '.dmg', '.ipa'];
+  const fileExtension = file.name.toLowerCase().match(/\.\w+$/)?.[0] || '';
+  if (dangerousExtensions.includes(fileExtension)) {
     securityStatus = 'Suspicious';
-    riskScore = 95;
-    reason = 'Abnormal Entropy in Text (Potential Encrypted Payload)';
+    riskScore = 98;
+    reason = `Blocked: Executable file type (${fileExtension})`;
+  }
+  
+  // 2. CHECK FOR FILE TYPE MISMATCH (e.g., .exe disguised as .txt)
+  const headerSignatures: Record<string, string[]> = {
+    'MZ': ['.exe', '.dll', '.sys', '.scr', '.msi', '.com'], // Windows executable
+    '\x7fELF': ['.so', '.bin'], // ELF header (Linux/Unix executable)
+    'PK': ['.zip', '.jar', '.docx', '.xlsx', '.apk'], // Zip-based files
+  };
+  
+  const headerStr = new TextDecoder().decode(sample.slice(0, 4));
+  for (const [sig, validExts] of Object.entries(headerSignatures)) {
+    if (headerStr.startsWith(sig) && !validExts.includes(fileExtension)) {
+      securityStatus = 'Suspicious';
+      riskScore = 99;
+      reason = `Blocked: File type mismatch - Header indicates ${sig} but extension is ${fileExtension}`;
+    }
+  }
+  
+  // 3. CHECK FOR ABNORMAL ENTROPY (Encrypted/Packed Malware)
+  if (entropy > 7.8 && !['DEFLATE_ZIP', 'LZMA_7Z', 'DCT_JPEG', 'DCT_VIDEO', 'ZSTD', 'AUDIO_MP3', 'AUDIO_FLAC'].includes(family)) {
+    securityStatus = 'Suspicious';
+    riskScore = 92;
+    reason = 'Blocked: Abnormal entropy detected (possible packed/encrypted malware)';
+  }
+  
+  // 4. CHECK FOR TEXT FILES WITH SUSPICIOUS PATTERNS
+  if ((file.name.endsWith('.txt') || file.name.endsWith('.js') || file.name.endsWith('.json')) && entropy > CONFIG.RANSOMWARE_THRESHOLD) {
+    securityStatus = 'Suspicious';
+    riskScore = 90;
+    reason = 'Blocked: Abnormal Entropy in Text/Code (Potential Encrypted Payload)';
+  }
+  
+  // 5. CHECK FOR DOUBLE EXTENSIONS (e.g., document.pdf.exe)
+  const nameParts = file.name.split('.');
+  if (nameParts.length > 2) {
+    const lastExt = '.' + nameParts[nameParts.length - 1].toLowerCase();
+    if (dangerousExtensions.includes(lastExt)) {
+      securityStatus = 'Suspicious';
+      riskScore = 97;
+      reason = `Blocked: Suspicious double extension detected (${file.name})`;
+    }
+  }
+  
+  // 6. CHECK FOR SCRIPT INJECTION PATTERNS
+  const scriptPatterns = ['script>', 'javascript:', 'onerror=', 'onload=', 'eval(', 'exec(', 'system(', 'WScript.Shell'];
+  const fileContent = new TextDecoder().decode(sample.slice(0, Math.min(10000, sample.length)));
+  if (scriptPatterns.some(pattern => fileContent.toLowerCase().includes(pattern.toLowerCase()))) {
+    if (file.name.endsWith('.html') || file.name.endsWith('.htm')) {
+      securityStatus = 'Suspicious';
+      riskScore = 88;
+      reason = 'Blocked: Potential malicious script injection detected in HTML file';
+    }
   }
 
   // --- HEURISTIC SELECTION (FORCED COMPRESSION) ---
