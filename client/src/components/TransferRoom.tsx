@@ -10,7 +10,28 @@ import { getCompressionStats } from '../lib/stats';
 import { FilePicker } from './FilePicker';
 import { TransferProgressStages, type TransferStage } from './TransferProgressStages';
 import {
-  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Zap, Terminal, Signal, Loader2, Users, Play, LogOut, ShieldAlert, Search, UserX, ChevronDown, ShieldCheck, Globe, Info
+  Cpu,
+  Wifi,
+  Download,
+  Bell,
+  Lock,
+  Activity,
+  Layers,
+  Zap,
+  Terminal,
+  Loader2,
+  Users,
+  Play,
+  LogOut,
+  ShieldAlert,
+  Search,
+  UserX,
+  ChevronDown,
+  ShieldCheck,
+  Globe,
+  Info,
+  UserPlus,
+  ArrowLeft,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -126,7 +147,7 @@ export const TransferRoom = () => {
   // --- NETWORKING: ROOMS & DISCOVERY ---
   const [roomId, setRoomId] = useState('');
   const [isJoined, setIsJoined] = useState(false);
-  const [roomMode, setRoomMode] = useState<'select' | 'create' | 'join'>('select'); // 'select' = show Create/Join buttons, 'create' = room created, 'join' = joining
+  const [roomMode, setRoomMode] = useState<'select' | 'create' | 'join' | 'addUser'>('select'); // 'select' = show Create/Join buttons, 'create' = room created, 'join' = joining, 'addUser' = search user by ID
   const [joinRoomInput, setJoinRoomInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<string | null>(null);
@@ -155,6 +176,7 @@ export const TransferRoom = () => {
   const [advancedStats, setAdvancedStats] = useState<any>(null);
   const [transferStage, setTransferStage] = useState<TransferStage>('idle');
   const [currentFileName, setCurrentFileName] = useState('');
+  const [showAddUserPanel, setShowAddUserPanel] = useState(false);
 
   // Terminal Logger
   const addLog = (msg: string) => setLogs(prev => [...prev.slice(-19), `${new Date().toLocaleTimeString()} - ${msg}`]);
@@ -700,9 +722,9 @@ export const TransferRoom = () => {
                 </h2>
                 
                 {roomMode === 'select' ? (
-                  // Show Create/Join buttons
+                  // Show Create/Join/Add User buttons
                   <div className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                       <button 
                         onClick={handleCreateRoom}
                         className="bg-gradient-to-br from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white font-bold py-4 px-6 rounded-2xl transition-all shadow-xl shadow-blue-600/30 flex flex-col items-center justify-center gap-2 group"
@@ -717,6 +739,14 @@ export const TransferRoom = () => {
                       >
                         <Users className="w-5 h-5 group-hover:scale-110 transition-transform" />
                         <span className="text-sm">Join Room</span>
+                      </button>
+
+                      <button 
+                        onClick={() => setRoomMode('addUser')}
+                        className="bg-gradient-to-br from-emerald-600 to-emerald-700 hover:from-emerald-500 hover:to-emerald-600 text-white font-bold py-4 px-6 rounded-2xl transition-all shadow-xl shadow-emerald-600/30 flex flex-col items-center justify-center gap-2 group"
+                      >
+                        <UserPlus className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                        <span className="text-sm">Add User</span>
                       </button>
                     </div>
                     <p className="text-xs text-gray-500 text-center flex items-center justify-center gap-2"><Info className="w-3 h-3" /> Each room gets a unique 6-character ID.</p>
@@ -751,10 +781,83 @@ export const TransferRoom = () => {
                     </button>
                     <p className="text-xs text-gray-500 text-center"><Info className="w-3 h-3 inline mr-1" /> Enter the room ID shared by the creator.</p>
                   </div>
+                ) : roomMode === 'addUser' ? (
+                  // Add user by searching username (direct handshake)
+                  <div className="space-y-4">
+                    <p className="text-xs text-gray-400">
+                      Search a verified username and send a direct encrypted handshake — no room ID required.
+                    </p>
+                    <div className="relative group">
+                      <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5 group-focus-within:text-blue-500 transition-colors" />
+                      <input
+                        type="text"
+                        placeholder="Search unique username (e.g. alice, bob)"
+                        className="w-full bg-black border border-gray-700 rounded-2xl py-4 pl-12 pr-4 text-white outline-none focus:border-blue-500/50 transition-all font-medium"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value.trim().toLowerCase())}
+                      />
+
+                      {isSearching && (
+                        <div className="absolute right-4 top-1/2 -translate-y-1/2">
+                          <Loader2 className="animate-spin w-4 h-4 text-blue-500" />
+                        </div>
+                      )}
+
+                      <AnimatePresence>
+                        {searchQuery.length > 2 && !isSearching && (
+                          <motion.div
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 10 }}
+                            className="absolute top-full left-0 right-0 mt-3 bg-[#1A202C] border border-gray-700 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] z-50 overflow-hidden"
+                          >
+                            {verifiedUser ? (
+                              <div
+                                className="p-4 flex items-center justify-between hover:bg-gray-800/50 cursor-pointer transition-colors"
+                                onClick={() => handleDirectConnect(searchResult || verifiedUser.name)}
+                              >
+                                <div className="flex items-center gap-4">
+                                  <div className="w-10 h-10 rounded-xl bg-green-500/20 text-green-400 flex items-center justify-center border border-green-500/30 font-bold shadow-inner">
+                                    {verifiedUser.name[0].toUpperCase()}
+                                  </div>
+                                  <div>
+                                    <span className="font-bold text-gray-200 block">{verifiedUser.name}</span>
+                                    <span className="text-[10px] text-green-400 font-mono tracking-tighter flex items-center gap-1">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" /> ONLINE
+                                    </span>
+                                  </div>
+                                </div>
+                                <button className="text-xs font-black bg-blue-600 hover:bg-blue-500 text-white px-5 py-2.5 rounded-xl shadow-lg transition-all active:scale-95">
+                                  CONNECT
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="p-6 text-center text-gray-500 text-sm flex flex-col items-center gap-2">
+                                <UserX className="w-8 h-8 opacity-20" />
+                                No user matches this identifier.
+                              </div>
+                            )}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
+                    <button 
+                      onClick={() => {
+                        setRoomMode('select');
+                        setSearchQuery('');
+                        setSearchResult(null);
+                        setVerifiedUser(null);
+                      }}
+                      className="w-full text-xs font-bold text-gray-400 hover:text-gray-300 py-2 transition-colors flex items-center justify-center gap-2"
+                    >
+                      <ArrowLeft className="w-4 h-4" /> Back
+                    </button>
+                  </div>
                 ) : null}
               </div>
             ) : (
-              <div className="relative z-10 flex items-center justify-between">
+              <div className="relative z-10 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                 <div className="space-y-1">
                   <h2 className="text-2xl font-black text-white flex items-center gap-3 italic tracking-tight uppercase">
                     <Globe className="text-blue-500 animate-pulse" /> {roomId}
@@ -764,61 +867,33 @@ export const TransferRoom = () => {
                     <p className="text-xs font-bold text-blue-400 uppercase tracking-widest">{peers.length} Nodes Connected</p>
                   </div>
                 </div>
-                <div className="flex -space-x-3 hover:space-x-1 transition-all duration-500">
-                  {peers.map((p, i) => (
-                    <motion.div
-                      key={i}
-                      initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }}
-                      title={`${p.username} (${p.status})`}
-                      className={clsx("w-12 h-12 rounded-2xl border-4 border-[#121826] flex items-center justify-center text-sm font-black text-white shadow-xl transition-transform hover:scale-110 cursor-pointer",
-                        p.status === 'connected' ? "bg-gradient-to-br from-green-500 to-emerald-700" : "bg-gradient-to-br from-yellow-500 to-orange-700")}
-                    >
-                      {p.username[0].toUpperCase()}
-                    </motion.div>
-                  ))}
-                  {peers.length === 0 && <div className="text-gray-500 text-sm font-bold animate-pulse px-4 border-l border-gray-800">Waiting for peers to join...</div>}
+                <div className="flex items-center gap-4">
+                  <div className="flex -space-x-3 hover:space-x-1 transition-all duration-500">
+                    {peers.map((p, i) => (
+                      <motion.div
+                        key={i}
+                        initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }}
+                        title={`${p.username} (${p.status})`}
+                        className={clsx("w-12 h-12 rounded-2xl border-4 border-[#121826] flex items-center justify-center text-sm font-black text-white shadow-xl transition-transform hover:scale-110 cursor-pointer",
+                          p.status === 'connected' ? "bg-gradient-to-br from-green-500 to-emerald-700" : "bg-gradient-to-br from-yellow-500 to-orange-700")}
+                      >
+                        {p.username[0].toUpperCase()}
+                      </motion.div>
+                    ))}
+                    {peers.length === 0 && <div className="text-gray-500 text-sm font-bold animate-pulse px-4 border-l border-gray-800">Waiting for peers to join...</div>}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddUserPanel(true)}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-bold uppercase tracking-widest text-white shadow-lg shadow-emerald-600/30 transition-all"
+                  >
+                    <UserPlus className="w-4 h-4" />
+                    Add User
+                  </button>
                 </div>
               </div>
             )}
           </div>
-
-          {/* DIRECT SEARCH FALLBACK (VISIBLE WHEN NOT IN ROOM) */}
-          {!isJoined && (
-            <div className="bg-[#121826] border border-gray-800 rounded-3xl p-6 shadow-xl relative z-20">
-              <h2 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-3"><Signal className="w-4 h-4 text-blue-400" /> Direct Handshake</h2>
-              <div className="relative group">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5 group-focus-within:text-blue-500 transition-colors" />
-                <input
-                  type="text" placeholder="Search unique username for 1-to-1 tunnel..."
-                  className="w-full bg-black border border-gray-700 rounded-2xl py-4 pl-12 pr-4 text-white outline-none focus:border-blue-500/50 transition-all font-medium"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value.trim().toLowerCase())}
-                />
-
-                {isSearching && (
-                  <div className="absolute right-4 top-1/2 -translate-y-1/2"><Loader2 className="animate-spin w-4 h-4 text-blue-500" /></div>
-                )}
-
-                <AnimatePresence>
-                  {searchQuery.length > 2 && !isSearching && (
-                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="absolute top-full left-0 right-0 mt-3 bg-[#1A202C] border border-gray-700 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] z-50 overflow-hidden">
-                      {verifiedUser ? (
-                        <div className="p-4 flex items-center justify-between hover:bg-gray-800/50 cursor-pointer transition-colors" onClick={() => handleDirectConnect(searchResult!)}>
-                          <div className="flex items-center gap-4">
-                            <div className="w-10 h-10 rounded-xl bg-green-500/20 text-green-400 flex items-center justify-center border border-green-500/30 font-bold shadow-inner">{verifiedUser.name[0].toUpperCase()}</div>
-                            <div><span className="font-bold text-gray-200 block">{verifiedUser.name}</span><span className="text-[10px] text-green-400 font-mono tracking-tighter flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" /> ONLINE</span></div>
-                          </div>
-                          <button className="text-xs font-black bg-blue-600 hover:bg-blue-500 text-white px-5 py-2.5 rounded-xl shadow-lg transition-all active:scale-95">CONNECT</button>
-                        </div>
-                      ) : (
-                        <div className="p-6 text-center text-gray-500 text-sm flex flex-col items-center gap-2"><UserX className="w-8 h-8 opacity-20" /> No user matches this identifier.</div>
-                      )}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            </div>
-          )}
 
           {/* FILE SELECTION PIPELINE */}
           <div className="relative z-10 group">
@@ -1029,6 +1104,109 @@ export const TransferRoom = () => {
               </div>
             </motion.div>
           </div>
+        )}
+      </AnimatePresence>
+
+      {/* MODAL: ADD USER WHILE IN ROOM */}
+      <AnimatePresence>
+        {showAddUserPanel && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[90] flex items-center justify-center bg-black/80 backdrop-blur-md px-6"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 20, opacity: 0 }}
+              animate={{ scale: 1, y: 0, opacity: 1 }}
+              exit={{ scale: 0.95, y: 20, opacity: 0 }}
+              className="bg-[#121826] border border-emerald-500/40 p-8 rounded-[2.5rem] shadow-[0_0_80px_rgba(16,185,129,0.3)] max-w-lg w-full relative overflow-hidden"
+            >
+              <div className="absolute -top-24 -right-24 w-48 h-48 bg-emerald-500/10 rounded-full blur-3xl" />
+              <div className="absolute -bottom-24 -left-24 w-48 h-48 bg-emerald-500/10 rounded-full blur-3xl" />
+
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h3 className="text-xl font-black text-white tracking-tight flex items-center gap-2">
+                    <UserPlus className="w-5 h-5 text-emerald-400" /> Add User to Mesh
+                  </h3>
+                  <p className="text-xs text-gray-400 mt-1">
+                    Initiate a direct encrypted handshake with a verified username — no room ID sharing required.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowAddUserPanel(false)}
+                  className="text-xs text-gray-500 hover:text-gray-300 font-bold uppercase tracking-widest"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <div className="relative group">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5 group-focus-within:text-emerald-400 transition-colors" />
+                  <input
+                    type="text"
+                    placeholder="Search unique username (e.g. alice, bob)"
+                    className="w-full bg-black border border-gray-700 rounded-2xl py-3.5 pl-12 pr-4 text-white outline-none focus:border-emerald-500/60 transition-all font-medium"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value.trim().toLowerCase())}
+                  />
+
+                  {isSearching && (
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2">
+                      <Loader2 className="animate-spin w-4 h-4 text-emerald-400" />
+                    </div>
+                  )}
+
+                  <AnimatePresence>
+                    {searchQuery.length > 2 && !isSearching && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: 10 }}
+                        className="absolute top-full left-0 right-0 mt-3 bg-[#1A202C] border border-gray-700 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] z-50 overflow-hidden"
+                      >
+                        {verifiedUser ? (
+                          <div
+                            className="p-4 flex items-center justify-between hover:bg-gray-800/50 cursor-pointer transition-colors"
+                            onClick={() => {
+                              handleDirectConnect(searchResult || verifiedUser.name);
+                              setShowAddUserPanel(false);
+                            }}
+                          >
+                            <div className="flex items-center gap-4">
+                              <div className="w-10 h-10 rounded-xl bg-green-500/20 text-green-400 flex items-center justify-center border border-green-500/30 font-bold shadow-inner">
+                                {verifiedUser.name[0].toUpperCase()}
+                              </div>
+                              <div>
+                                <span className="font-bold text-gray-200 block">{verifiedUser.name}</span>
+                                <span className="text-[10px] text-green-400 font-mono tracking-tighter flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" /> ONLINE
+                                </span>
+                              </div>
+                            </div>
+                            <button className="text-xs font-black bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2.5 rounded-xl shadow-lg transition-all active:scale-95">
+                              CONNECT
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="p-6 text-center text-gray-500 text-sm flex flex-col items-center gap-2">
+                            <UserX className="w-8 h-8 opacity-20" />
+                            No user matches this identifier.
+                          </div>
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                <p className="text-[10px] text-gray-500 mt-1">
+                  Tip: Usernames are case-insensitive and must match exactly what the receiver used during registration.
+                </p>
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
 
