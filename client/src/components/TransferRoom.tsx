@@ -1070,14 +1070,6 @@ export const TransferRoom = () => {
                 </span>
                 <span className="text-xs font-mono font-black text-gray-400 bg-gray-800/50 px-3 py-1 rounded-lg">{Math.round(progress)}% Complete</span>
               </div>
-              <div className="w-full h-2.5 bg-gray-900 rounded-full overflow-hidden border border-gray-800 shadow-inner">
-                <motion.div
-                  className="h-full bg-gradient-to-r from-blue-600 via-cyan-400 to-blue-600"
-                  style={{ width: `${progress}%` }}
-                  animate={{ backgroundPosition: ['0% 50%', '100% 50%', '0% 50%'] }}
-                  transition={{ duration: 5, repeat: Infinity, ease: 'linear' }}
-                />
-              </div>
             </div>
           </motion.div>
         )}
