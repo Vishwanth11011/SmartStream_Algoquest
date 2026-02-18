@@ -120,14 +120,18 @@ export const processFile = async (file: File): Promise<{ file: Blob, meta: FileM
   }
   
   // 3. CHECK FOR ABNORMAL ENTROPY (Encrypted/Packed Malware)
-  if (entropy > 7.8 && !['DEFLATE_ZIP', 'LZMA_7Z', 'DCT_JPEG', 'DCT_VIDEO', 'ZSTD', 'AUDIO_MP3', 'AUDIO_FLAC'].includes(family)) {
-    securityStatus = 'Suspicious';
-    riskScore = 92;
-    reason = 'Blocked: Abnormal entropy detected (possible packed/encrypted malware)';
+  // Only apply abnormal entropy block to text/code files, not to binary/document types
+  const textExtensions = ['.txt', '.js', '.json', '.ipynb', '.xml', '.csv', '.md', '.html', '.css'];
+  if (textExtensions.some(ext => file.name.endsWith(ext))) {
+    if (entropy > 7.8 && !['DEFLATE_ZIP', 'LZMA_7Z', 'DCT_JPEG', 'DCT_VIDEO', 'ZSTD', 'AUDIO_MP3', 'AUDIO_FLAC'].includes(family)) {
+      securityStatus = 'Suspicious';
+      riskScore = 92;
+      reason = 'Blocked: Abnormal entropy detected (possible packed/encrypted malware)';
+    }
   }
   
   // 4. CHECK FOR TEXT FILES WITH SUSPICIOUS PATTERNS
-  if ((file.name.endsWith('.txt') || file.name.endsWith('.js') || file.name.endsWith('.json')) && entropy > CONFIG.RANSOMWARE_THRESHOLD) {
+  if ((file.name.endsWith('.txt') || file.name.endsWith('.js') || file.name.endsWith('.json') || file.name.endsWith('.ipynb')) && entropy > CONFIG.RANSOMWARE_THRESHOLD) {
     securityStatus = 'Suspicious';
     riskScore = 90;
     reason = 'Blocked: Abnormal Entropy in Text/Code (Potential Encrypted Payload)';
@@ -159,7 +163,7 @@ export const processFile = async (file: File): Promise<{ file: Blob, meta: FileM
 
   // STRATEGY 1: TEXT & DATA -> DEFLATE (Ultra)
   // Text, JSON, Code, XML, SVGs compress best with raw DEFLATE at high levels.
-  if (family === 'TEXT_DATA' || file.type.includes('text') || file.name.endsWith('.json') || file.name.endsWith('.js')) {
+  if (family === 'TEXT_DATA' || file.type.includes('text') || file.name.endsWith('.json') || file.name.endsWith('.js') || file.name.endsWith('.ipynb')) {
     try {
       algorithm = 'Deflate (Ultra Level 9)';
       processedData = deflateSync(rawData, { level: 9 });
