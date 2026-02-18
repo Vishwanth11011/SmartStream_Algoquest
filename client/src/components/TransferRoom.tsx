@@ -252,23 +252,18 @@ export const TransferRoom = () => {
       let manager = peersRef.current.get(sender);
 
       if (!manager) {
-        setPeers(prev =>
-          prev.find(p => p.id === sender)
-            ? prev
-            : [...prev, { id: sender, username: `Guest_${sender.slice(0, 4)}`, status: 'Connecting...' }]
-        );
-
-        // By default, create as non-initiator. The side that explicitly
-        // wants to start WebRTC (e.g. after Accept) will call createPeerConnection
-        // with isInitiator = true.
+        setPeers(prev => prev.find(p => p.id === sender) ? prev : [...prev, { id: sender, username: `Guest_${sender.slice(0, 4)}`, status: 'Connecting...' }]);
         manager = createPeerConnection(sender, false);
+        // Ensure manager is properly initialized before handling signal
         if (!manager) {
           console.error(`Failed to create peer connection for ${sender}`);
           return;
         }
       }
 
-      await manager.handleSignal(payload);
+      if (manager) {
+        await manager.handleSignal(payload);
+      }
 
       // ✅ CAPTURE SENDER ID HERE
       if (payload.type === 'conn-request') {
@@ -401,41 +396,29 @@ export const TransferRoom = () => {
 
   // ✅ COMPLETE HANDSHAKE LOGIC
   const acceptRequest = async () => {
-    if (!incomingRequest) return;
+    if (!incomingRequest || !keyPairRef.current) return;
 
     try {
         const { id: senderId, key: foreignKeyJson, from } = incomingRequest;
         addLog(`🔐 Establishing secure tunnel with ${from}...`);
 
-        // Ensure we have a local keypair ready on the receiver as well
-        if (!keyPairRef.current) {
-          const keys = await generateKeyPair();
-          keyPairRef.current = keys;
-          addLog("Local Identity ECDH Keys Generated (receiver)");
-        }
-
         // 1. Import their key
         const foreignKey = await importPublicKey(foreignKeyJson);
         
         // 2. Derive shared secret
-        const sharedKey = await deriveSharedKey(keyPairRef.current!.privateKey, foreignKey);
+        const sharedKey = await deriveSharedKey(keyPairRef.current.privateKey, foreignKey);
         
         // 3. Save key mapped to their Socket ID
         keysRef.current.set(senderId, sharedKey);
         
-        // 4. Send OUR public key back so they can derive the same secret
-        const myPublicKey = await exportPublicKey(keyPairRef.current!.publicKey);
+        // 4. Send OUR public key back
+        const myPublicKey = await exportPublicKey(keyPairRef.current.publicKey);
         socket.emit('signal', { 
             target: senderId, 
             payload: { type: 'pub-key', key: myPublicKey, username } 
         });
 
-        // 5. Start WebRTC as INITIATOR from the receiver side
-        if (!peersRef.current.get(senderId)) {
-          createPeerConnection(senderId, true);
-        }
-
-        // 6. Update UI
+        // 5. Update UI
         setEncryptionReady(true);
         setPeers(prev => {
             if (prev.find(p => p.id === senderId)) return prev.map(p => p.id === senderId ? {...p, status: 'connected'} : p);
