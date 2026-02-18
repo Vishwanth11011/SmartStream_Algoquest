@@ -108,6 +108,16 @@ const socket: Socket = io(SERVER_URL, {
 export const TransferRoom = () => {
   const navigate = useNavigate();
 
+  // Helper function to generate unique 6-character room ID (lowercase letters + numbers)
+  const generateRoomId = (): string => {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let roomId = '';
+    for (let i = 0; i < 6; i++) {
+      roomId += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return roomId;
+  };
+
   // --- CORE IDENTITY STATE ---
   const [username] = useState(localStorage.getItem('username') || '');
   const [status, setStatus] = useState('Initializing Systems...');
@@ -116,6 +126,8 @@ export const TransferRoom = () => {
   // --- NETWORKING: ROOMS & DISCOVERY ---
   const [roomId, setRoomId] = useState('');
   const [isJoined, setIsJoined] = useState(false);
+  const [roomMode, setRoomMode] = useState<'select' | 'create' | 'join'>('select'); // 'select' = show Create/Join buttons, 'create' = room created, 'join' = joining
+  const [joinRoomInput, setJoinRoomInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
@@ -314,12 +326,26 @@ export const TransferRoom = () => {
   // =========================================
   // 4. USER INTERACTION HANDLERS
   // =========================================
-  const handleJoinRoom = () => {
-    if (!roomId) return alert("Please provide a Room ID");
-    console.log(`[Room] Attempting to join room: ${roomId} as user: ${username}`);
-    socket.emit('join-room', roomId, username);
+  const handleCreateRoom = () => {
+    const newRoomId = generateRoomId();
+    setRoomId(newRoomId);
+    setRoomMode('create');
+    console.log(`[Room] Created new room with ID: ${newRoomId}`);
+    socket.emit('join-room', newRoomId, username);
     setIsJoined(true);
-    addLog(`Joined Private Mesh Room: ${roomId}`);
+    addLog(`Created Private Mesh Room: ${newRoomId}`);
+  };
+
+  const handleJoinRoom = () => {
+    const idToJoin = joinRoomInput.trim().toLowerCase();
+    if (!idToJoin) return alert("Please enter a Room ID");
+    if (idToJoin.length !== 6) return alert("Room ID must be exactly 6 characters");
+    console.log(`[Room] Attempting to join room: ${idToJoin} as user: ${username}`);
+    socket.emit('join-room', idToJoin, username);
+    setRoomId(idToJoin);
+    setRoomMode('join');
+    setIsJoined(true);
+    addLog(`Joined Private Mesh Room: ${idToJoin}`);
   };
 
   const handleDirectConnect = (targetUsername: string) => {
@@ -672,18 +698,60 @@ export const TransferRoom = () => {
                 <h2 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-6 flex items-center gap-3">
                   <Users className="w-5 h-5 text-blue-400" /> Mesh Room Initialization
                 </h2>
-                <div className="flex gap-4 p-1.5 bg-black/50 rounded-2xl border border-gray-700 focus-within:border-blue-500 transition-all">
-                  <input
-                    value={roomId}
-                    onChange={e => setRoomId(e.target.value)}
-                    placeholder="Create or Enter Room Identifier (e.g. 'Project-X')"
-                    className="flex-1 bg-transparent px-5 py-3 text-white outline-none placeholder:text-gray-600 font-medium"
-                  />
-                  <button onClick={handleJoinRoom} className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-8 rounded-xl transition-all shadow-xl shadow-blue-600/20 flex items-center gap-2">
-                    <Play className="w-4 h-4 fill-current" /> JOIN ROOM
-                  </button>
-                </div>
-                <p className="mt-4 text-xs text-gray-500 flex items-center gap-2"><Info className="w-3 h-3" /> Entering a room establishes a full-mesh P2P network with all participants.</p>
+                
+                {roomMode === 'select' ? (
+                  // Show Create/Join buttons
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <button 
+                        onClick={handleCreateRoom}
+                        className="bg-gradient-to-br from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white font-bold py-4 px-6 rounded-2xl transition-all shadow-xl shadow-blue-600/30 flex flex-col items-center justify-center gap-2 group"
+                      >
+                        <Zap className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                        <span className="text-sm">Create Room</span>
+                      </button>
+                      
+                      <button 
+                        onClick={() => setRoomMode('join')}
+                        className="bg-gradient-to-br from-purple-600 to-purple-700 hover:from-purple-500 hover:to-purple-600 text-white font-bold py-4 px-6 rounded-2xl transition-all shadow-xl shadow-purple-600/30 flex flex-col items-center justify-center gap-2 group"
+                      >
+                        <Users className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                        <span className="text-sm">Join Room</span>
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-500 text-center flex items-center justify-center gap-2"><Info className="w-3 h-3" /> Each room gets a unique 6-character ID.</p>
+                  </div>
+                ) : roomMode === 'join' ? (
+                  // Show join input field
+                  <div className="space-y-4">
+                    <div className="flex gap-3">
+                      <input
+                        value={joinRoomInput}
+                        onChange={e => setJoinRoomInput(e.target.value.toUpperCase())}
+                        onKeyPress={(e) => e.key === 'Enter' && handleJoinRoom()}
+                        placeholder="Enter 6-character Room ID (e.g. 'a1b2c3')"
+                        className="flex-1 bg-black border border-gray-700 focus:border-purple-500 rounded-2xl px-5 py-3 text-white outline-none placeholder:text-gray-600 font-medium uppercase tracking-wider transition-all"
+                        maxLength={6}
+                      />
+                      <button 
+                        onClick={handleJoinRoom}
+                        className="bg-purple-600 hover:bg-purple-500 text-white font-bold px-8 py-3 rounded-xl transition-all shadow-xl shadow-purple-600/20 flex items-center gap-2"
+                      >
+                        <Play className="w-4 h-4 fill-current" /> JOIN
+                      </button>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        setRoomMode('select');
+                        setJoinRoomInput('');
+                      }}
+                      className="w-full text-xs font-bold text-gray-400 hover:text-gray-300 py-2 transition-colors"
+                    >
+                      ← Back
+                    </button>
+                    <p className="text-xs text-gray-500 text-center"><Info className="w-3 h-3 inline mr-1" /> Enter the room ID shared by the creator.</p>
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div className="relative z-10 flex items-center justify-between">
