@@ -10,7 +10,7 @@ import { getCompressionStats } from '../lib/stats';
 import { FilePicker } from './FilePicker';
 import { TransferProgressStages, type TransferStage } from './TransferProgressStages';
 import {
-  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Zap, Terminal, Signal, Loader2, Users, Play, LogOut, ShieldAlert, Search, UserX, ChevronDown, ShieldCheck, Globe, Info, XCircle, CheckCircle
+  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Zap, Terminal, Signal, Loader2, Users, LogOut, ShieldAlert, Search, UserX, ChevronDown, ShieldCheck, Globe, Info, XCircle, CheckCircle
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -805,54 +805,60 @@ export const TransferRoom = () => {
         {/* LEFT COLUMN: PRIMARY CONTROLS */}
         <div className="lg:col-span-8 space-y-6">
 
-          {/* MESH DISCOVERY PANEL */}
-          <div className="bg-[#121826] border border-gray-800 rounded-3xl p-8 shadow-2xl relative z-30 overflow-hidden">
-            <div className="absolute top-0 right-0 p-4 opacity-10"><Zap className="w-32 h-32 text-blue-500" /></div>
+          {/* MESH DISCOVERY PANEL - 3D STYLE */}
+          <div className="bg-gradient-to-b from-[#1a1f2e] to-[#121826] border border-black/50 rounded-[2rem] p-8 shadow-[0_20px_50px_-12px_rgba(0,0,0,0.7)] relative z-30 overflow-hidden group hover:shadow-[0_30px_60px_-12px_rgba(0,0,0,0.8)] transition-all duration-500">
+            {/* Inner Top Highlight for 3D effect */}
+            <div className="absolute inset-x-0 top-0 h-px bg-white/10" />
+
+            <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity duration-500 transform group-hover:scale-110"><Zap className="w-40 h-40 text-blue-500 blur-sm" /></div>
+
             {!isJoined ? (
               <div className="relative z-10">
-                <h2 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-6 flex items-center gap-3">
-                  <Users className="w-5 h-5 text-blue-400" /> Mesh Room Initialization
+                <h2 className="text-sm font-black text-gray-400 uppercase tracking-[0.2em] mb-8 flex items-center gap-3 border-b border-gray-800 pb-4">
+                  <Users className="w-5 h-5 text-blue-500" /> Mesh Room Initialization
                 </h2>
 
                 {roomMode === 'select' ? (
                   // Show Create/Join buttons
-                  <div className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-6">
+                    <div className="grid grid-cols-2 gap-6">
                       <button
                         onClick={handleCreateRoom}
-                        className="bg-gradient-to-br from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white font-bold py-4 px-6 rounded-2xl transition-all shadow-xl shadow-blue-600/30 flex flex-col items-center justify-center gap-2 group"
+                        className="bg-[#1A202C] hover:bg-[#232936] text-white font-bold py-6 px-6 rounded-2xl transition-all shadow-lg border border-gray-700/50 hover:border-blue-500/50 flex flex-col items-center justify-center gap-3 group relative overflow-hidden"
                       >
-                        <Zap className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                        <span className="text-sm">Create Room</span>
+                        <div className="absolute inset-0 bg-blue-500/5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                        <div className="p-3 rounded-full bg-blue-500/10 text-blue-400 group-hover:scale-110 transition-transform"><Zap className="w-6 h-6" /></div>
+                        <span className="text-sm font-black tracking-wide">CREATE MESH</span>
                       </button>
 
                       <button
                         onClick={() => setRoomMode('join')}
-                        className="bg-gradient-to-br from-purple-600 to-purple-700 hover:from-purple-500 hover:to-purple-600 text-white font-bold py-4 px-6 rounded-2xl transition-all shadow-xl shadow-purple-600/30 flex flex-col items-center justify-center gap-2 group"
+                        className="bg-[#1A202C] hover:bg-[#232936] text-white font-bold py-6 px-6 rounded-2xl transition-all shadow-lg border border-gray-700/50 hover:border-purple-500/50 flex flex-col items-center justify-center gap-3 group relative overflow-hidden"
                       >
-                        <Users className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                        <span className="text-sm">Join Room</span>
+                        <div className="absolute inset-0 bg-purple-500/5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                        <div className="p-3 rounded-full bg-purple-500/10 text-purple-400 group-hover:scale-110 transition-transform"><Users className="w-6 h-6" /></div>
+                        <span className="text-sm font-black tracking-wide">JOIN MESH</span>
                       </button>
                     </div>
-                    <p className="text-xs text-gray-500 text-center flex items-center justify-center gap-2"><Info className="w-3 h-3" /> Each room gets a unique 6-character ID.</p>
+                    <p className="text-[10px] text-gray-500 text-center flex items-center justify-center gap-2 font-mono uppercase tracking-widest"><Info className="w-3 h-3" /> Secure P2P Enclave Generation</p>
                   </div>
                 ) : roomMode === 'join' ? (
                   // Show join input field
-                  <div className="space-y-4">
-                    <div className="flex gap-3">
+                  <div className="space-y-6">
+                    <div className="flex gap-4">
                       <input
                         value={joinRoomInput}
                         onChange={e => setJoinRoomInput(e.target.value.toUpperCase())}
                         onKeyPress={(e) => e.key === 'Enter' && handleJoinRoom()}
-                        placeholder="Enter 6-character Room ID (e.g. 'a1b2c3')"
-                        className="flex-1 bg-black border border-gray-700 focus:border-purple-500 rounded-2xl px-5 py-3 text-white outline-none placeholder:text-gray-600 font-medium uppercase tracking-wider transition-all"
+                        placeholder="ROOM ID"
+                        className="flex-1 bg-black/50 border border-gray-700 focus:border-purple-500 rounded-2xl px-6 py-4 text-white outline-none placeholder:text-gray-700 font-black text-xl uppercase tracking-[0.2em] transition-all shadow-inner"
                         maxLength={6}
                       />
                       <button
                         onClick={handleJoinRoom}
-                        className="bg-purple-600 hover:bg-purple-500 text-white font-bold px-8 py-3 rounded-xl transition-all shadow-xl shadow-purple-600/20 flex items-center gap-2"
+                        className="bg-purple-600 hover:bg-purple-500 text-white font-black px-8 py-3 rounded-2xl transition-all shadow-lg shadow-purple-900/40 flex items-center gap-2 active:translate-y-1"
                       >
-                        <Play className="w-4 h-4 fill-current" /> JOIN
+                        ENTER
                       </button>
                     </div>
                     <button
@@ -860,47 +866,48 @@ export const TransferRoom = () => {
                         setRoomMode('select');
                         setJoinRoomInput('');
                       }}
-                      className="w-full text-xs font-bold text-gray-400 hover:text-gray-300 py-2 transition-colors"
+                      className="w-full text-xs font-bold text-gray-500 hover:text-gray-300 py-2 transition-colors uppercase tracking-widest"
                     >
-                      ← Back
+                      ← Abort Connection
                     </button>
-                    <p className="text-xs text-gray-500 text-center"><Info className="w-3 h-3 inline mr-1" /> Enter the room ID shared by the creator.</p>
                   </div>
                 ) : null}
               </div>
             ) : (
               <div className="relative z-10 flex items-center justify-between">
-                <div className="space-y-1">
-                  <h2 className="text-2xl font-black text-white flex items-center gap-3 italic tracking-tight uppercase">
-                    <Globe className="text-blue-500 animate-pulse" /> {roomId}
+                <div className="space-y-2">
+                  <h2 className="text-3xl font-black text-white flex items-center gap-4 tracking-tighter uppercase relative">
+                    <span className="text-gray-700 select-none">#</span> {roomId}
+                    <div className="absolute -top-3 -right-3 w-2 h-2 rounded-full bg-green-500 shadow-[0_0_10px_#22c55e]" />
                   </h2>
                   <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                    <p className="text-xs font-bold text-blue-400 uppercase tracking-widest">{peers.length} Nodes Connected</p>
+                    <span className="px-2 py-0.5 rounded bg-blue-500/10 border border-blue-500/20 text-[10px] font-bold text-blue-400 uppercase tracking-widest">
+                      {peers.length} Nodes Active
+                    </span>
                   </div>
                 </div>
                 {/* NEW: Leave Room Button */}
                 {isJoined && (
                   <button
                     onClick={handleLeaveRoom}
-                    className="flex items-center gap-2 px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-xl border border-red-500/20 transition-all text-xs font-bold uppercase tracking-wider"
+                    className="flex items-center gap-2 px-5 py-3 bg-red-500/5 hover:bg-red-500/10 text-red-500/80 hover:text-red-400 rounded-xl border border-red-500/10 transition-all text-[10px] font-black uppercase tracking-widest"
                   >
-                    <LogOut className="w-4 h-4" /> Leave Room
+                    <LogOut className="w-3 h-3" /> Disconnect
                   </button>
                 )}
-                <div className="flex -space-x-3 hover:space-x-1 transition-all duration-500">
+                <div className="flex -space-x-4 hover:space-x-1 transition-all duration-500 pl-4">
                   {peers.map((p, i) => (
                     <motion.div
                       key={i}
                       initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }}
                       title={`${p.username} (${p.status})`}
-                      className={clsx("w-12 h-12 rounded-2xl border-4 border-[#121826] flex items-center justify-center text-sm font-black text-white shadow-xl transition-transform hover:scale-110 cursor-pointer",
-                        p.status === 'connected' ? "bg-gradient-to-br from-green-500 to-emerald-700" : "bg-gradient-to-br from-yellow-500 to-orange-700")}
+                      className={clsx("w-14 h-14 rounded-2xl border-4 border-[#121826] flex items-center justify-center text-lg font-black text-white shadow-2xl transition-transform hover:scale-110 cursor-pointer relative z-10",
+                        p.status === 'connected' ? "bg-gradient-to-br from-green-500 to-emerald-700 shadow-green-900/20" : "bg-gradient-to-br from-yellow-500 to-orange-700")}
                     >
                       {p.username[0].toUpperCase()}
                     </motion.div>
                   ))}
-                  {peers.length === 0 && <div className="text-gray-500 text-sm font-bold animate-pulse px-4 border-l border-gray-800">Waiting for peers to join...</div>}
+                  {peers.length === 0 && <div className="text-gray-600 text-[10px] font-bold animate-pulse px-4 border-l border-gray-800 flex items-center h-14 uppercase tracking-widest">Awaiting Nodes...</div>}
                 </div>
               </div>
             )}
@@ -908,13 +915,14 @@ export const TransferRoom = () => {
 
           {/* DIRECT SEARCH FALLBACK (VISIBLE WHEN NOT IN ROOM) */}
           {!isJoined && (
-            <div className="hidden bg-[#121826] border border-gray-800 rounded-3xl p-6 shadow-xl relative z-20">
+            <div className="hidden bg-gradient-to-b from-[#1a1f2e] to-[#121826] border border-black/50 rounded-[2rem] p-6 shadow-xl relative z-20">
+              <div className="absolute inset-x-0 top-0 h-px bg-white/5" />
               <h2 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-3"><Signal className="w-4 h-4 text-blue-400" /> Direct Handshake</h2>
               <div className="relative group">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5 group-focus-within:text-blue-500 transition-colors" />
                 <input
                   type="text" placeholder="Search unique username for 1-to-1 tunnel..."
-                  className="w-full bg-black border border-gray-700 rounded-2xl py-4 pl-12 pr-4 text-white outline-none focus:border-blue-500/50 transition-all font-medium"
+                  className="w-full bg-black/60 border border-gray-700/50 rounded-2xl py-4 pl-12 pr-4 text-white outline-none focus:border-blue-500/50 transition-all font-medium placeholder:text-gray-700"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value.trim().toLowerCase())}
                 />
@@ -947,7 +955,7 @@ export const TransferRoom = () => {
           {/* FILE SELECTION PIPELINE */}
           <div className="relative z-10 group">
             {queueStatus && (
-              <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-4 bg-blue-500/10 border border-blue-500/20 p-4 rounded-2xl flex items-center justify-center gap-4 shadow-xl">
+              <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-4 bg-blue-500/10 border border-blue-500/20 p-4 rounded-2xl flex items-center justify-center gap-4 shadow-xl backdrop-blur-md">
                 <Loader2 className="animate-spin text-blue-400 w-5 h-5" />
                 <span className="text-sm font-black text-blue-400 uppercase tracking-widest">{queueStatus}</span>
               </motion.div>
@@ -1061,8 +1069,8 @@ export const TransferRoom = () => {
           )}
 
           {/* SYSTEM LOGS TERMINAL */}
-          <div className="bg-black border border-gray-800 rounded-[2.5rem] p-1 flex-1 flex flex-col min-h-[450px] shadow-[0_30px_60px_-12px_rgba(0,0,0,0.8)] overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between bg-gray-900/30 rounded-t-[2.4rem]">
+          <div className="bg-black border border-gray-800/80 rounded-[2.5rem] p-1 flex-1 flex flex-col min-h-[450px] shadow-[0_30px_60px_-12px_rgba(0,0,0,0.8)] overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-800/50 flex items-center justify-between bg-gradient-to-r from-gray-900 via-gray-900 to-black rounded-t-[2.4rem]">
               <div className="flex items-center gap-3">
                 <Terminal className="w-4 h-4 text-blue-500" />
                 <span className="text-[10px] font-black text-gray-500 tracking-[0.2em] uppercase">Security Engine Output</span>
@@ -1073,7 +1081,7 @@ export const TransferRoom = () => {
                 <div className="w-2.5 h-2.5 rounded-full bg-green-500/20 animate-pulse" />
               </div>
             </div>
-            <div className="flex-1 p-6 font-mono text-[10px] space-y-2 overflow-y-auto custom-scrollbar text-gray-400 bg-gradient-to-b from-black to-[#05070a]">
+            <div className="flex-1 p-6 font-mono text-[10px] space-y-2 overflow-y-auto custom-scrollbar text-gray-400 bg-[#05070a]">
               {logs.map((l, i) => (
                 <motion.div key={i} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} className="flex gap-3 items-start group">
                   <span className="text-blue-500 font-black opacity-40 group-hover:opacity-100 transition-opacity">»</span>
@@ -1173,14 +1181,17 @@ export const TransferRoom = () => {
   );
 };
 
-// --- SUBSIDIARY COMPONENT: PERFORMANCE CARD ---
+// --- SUBSIDIARY COMPONENT: PERFORMANCE CARD (3D STYLE) ---
 const StatCard = ({ label, value, icon: Icon, color }: any) => (
-  <div className="bg-[#121826] border border-gray-800 p-6 rounded-3xl flex flex-col justify-between h-32 shadow-xl hover:border-gray-700 transition-all group overflow-hidden relative">
+  <div className="bg-gradient-to-b from-[#1a1f2e] to-[#121826] border border-black/60 p-6 rounded-[1.5rem] flex flex-col justify-between h-32 shadow-[0_15px_30px_-5px_rgba(0,0,0,0.6)] hover:border-gray-700 transition-all group overflow-hidden relative active:scale-95">
+    {/* Inner highlight for convexity */}
+    <div className="absolute inset-x-0 top-0 h-px bg-white/10" />
+
     <div className="absolute top-0 right-0 p-2 opacity-5 group-hover:opacity-10 transition-opacity"><Icon className="w-16 h-16" /></div>
-    <div className="flex items-center justify-between mb-3">
-      <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest leading-none">{label}</span>
-      <div className={clsx("p-2 rounded-lg bg-gray-900/50 shadow-inner", color)}><Icon className="w-4 h-4" /></div>
+    <div className="flex items-center justify-between mb-3 relative z-10">
+      <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest leading-none">{label}</span>
+      <div className={clsx("p-2 rounded-lg bg-black/40 shadow-inner border border-white/5", color)}><Icon className="w-4 h-4" /></div>
     </div>
-    <span className="text-xl font-black text-gray-100 tracking-tighter tabular-nums">{value}</span>
+    <span className="text-xl font-black text-gray-100 tracking-tighter tabular-nums relative z-10">{value}</span>
   </div>
 );
