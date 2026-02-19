@@ -157,7 +157,7 @@ export const TransferRoom = () => {
 
   // --- UI & PIPELINE MONITORING ---
   const [isTransferring, setIsTransferring] = useState(false);
-  const [encryptionReady, setEncryptionReady] = useState(false);
+  const [, setEncryptionReady] = useState(false);
   const [, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [receivedFiles, setReceivedFiles] = useState<{ name: string, url: string, timestamp: number }[]>([]);
@@ -213,22 +213,32 @@ export const TransferRoom = () => {
     }
 
     const manager = new WebRTCManager(socket, targetId,
-      (data) => handleIncomingData(data, targetId),
+      (data) => {
+        console.log(`[createPeerConnection] Data received from ${targetId}`);
+        handleIncomingData(data, targetId);
+      },
       (state) => {
-        console.log(`[WebRTC] State change for ${targetId}: ${state}`);
+        console.log(`[createPeerConnection] State callback - ${targetId}: ${state}`);
         setPeers(prev => prev.map(p => p.id === targetId ? { ...p, status: state } : p));
+        
         if (state === 'connected') {
+          console.log(`[createPeerConnection] ✅ Connection CONNECTED to ${targetId}`);
           setP2pState('connected');
           if (keyPairRef.current) {
             exportPublicKey(keyPairRef.current.publicKey).then(k => {
-              console.log(`[WebRTC] Sending pub-key to ${targetId}`);
+              console.log(`[createPeerConnection] Sending pub-key to ${targetId}`);
               socket.emit('signal', { target: targetId, payload: { type: 'pub-key', key: k } });
             });
           }
         } else if (state === 'failed' || state === 'closed') {
-          console.log(`[WebRTC] Closing connection to ${targetId}`);
+          // Only delete on permanent failure or closed states, not on temporary disconnections
+          console.log(`[createPeerConnection] ❌ Connection ${state} for ${targetId}`);
           peersRef.current.delete(targetId);
           keysRef.current.delete(targetId);
+        }
+        // For 'disconnected' state: don't delete, just wait for reconnection or another signal
+        else if (state === 'disconnected') {
+          console.warn(`[createPeerConnection] ⚠️ Connection disconnected for ${targetId}, keeping peer in map for potential recovery`);
         }
       }
     );
@@ -292,9 +302,11 @@ export const TransferRoom = () => {
     });
 
     socket.on('signal', async ({ sender, payload }) => {
+      console.log(`[Socket] Received signal from ${sender}, type: ${payload.type}`);
       let manager = peersRef.current.get(sender);
 
       if (!manager) {
+        console.log(`[Socket] No existing manager for ${sender}, creating new one`);
         setPeers(prev => prev.find(p => p.id === sender) ? prev : [...prev, { id: sender, username: `Guest_${sender.slice(0, 4)}`, status: 'Connecting...' }]);
         manager = createPeerConnection(sender, false);
         // Ensure manager is properly initialized before handling signal
@@ -305,11 +317,13 @@ export const TransferRoom = () => {
       }
 
       if (manager) {
+        console.log(`[Socket] Routing signal to manager for ${sender}`);
         await manager.handleSignal(payload);
       }
 
       // ✅ CAPTURE SENDER ID HERE
       if (payload.type === 'conn-request') {
+        console.log(`[Socket] Connection request from ${sender}`);
         setIncomingRequest({
           from: payload.username || sender,
           key: payload.key,
@@ -318,11 +332,13 @@ export const TransferRoom = () => {
       }
 
       if (payload.type === 'pub-key') {
+        console.log(`[Socket] Public key received from ${sender}`);
         try {
           const foreignKey = await importPublicKey(payload.key);
           if (keyPairRef.current) {
             const shared = await deriveSharedKey(keyPairRef.current.privateKey, foreignKey);
             keysRef.current.set(sender, shared);
+            console.log(`[Socket] ✅ Shared key established for ${sender}`);
             addLog(`🔐 AES-256 secure tunnel synced with ${sender.slice(0, 4)}`);
             setEncryptionReady(true);
             setPeers(prev => prev.map(p => p.id === sender ? { ...p, status: 'connected' } : p));
@@ -333,28 +349,21 @@ export const TransferRoom = () => {
 
     socket.on('user-joined', ({ id, username }) => {
       console.log(`[Socket] User joined: ${username} (${id})`);
-      addLog(`${username} entered the mesh.`);
-      // Update if exists, otherwise add new peer with actual username
-      setPeers(prev => {
-        const existing = prev.find(p => p.id === id);
-        if (existing) {
-          // Update existing peer with the actual username (replace any Guest_ placeholder)
-          return prev.map(p => p.id === id ? { ...p, username } : p);
-        } else {
-          // Add new peer
-          return [...prev, { id, username, status: 'Connecting...' }];
-        }
-      });
-      const manager = createPeerConnection(id, false);
-      if (!manager) {
-        console.error(`Failed to create peer connection for new user ${id}`);
-      }
+      addLog(`${username} entered the mesh. Initiating secure connection...`);
+      setPeers(prev => prev.find(p => p.id === id) ? prev : [...prev, { id, username, status: 'Connecting...' }]);
+      // NEW USER: Let them initiate connections (we wait for their offer)
+      console.log(`[Socket] New user ${id} will initiate connection to us...`);
     });
 
     socket.on('existing-users', (users) => {
       console.log(`[Socket] Existing users received: ${users.length} users`);
+      if (users.length > 0) {
+        addLog(`Found ${users.length} existing peer(s) in room. Establishing connections...`);
+      } else {
+        addLog(`You are the first user in this room. Waiting for others to join...`);
+      }
       users.forEach((u: any) => {
-        console.log(`[Socket] Creating initiator connection to ${u.username} (${u.id})`);
+        console.log(`[Socket] WE (new user) will initiate to existing user: ${u.username} (${u.id})`);
         setPeers(prev => prev.find(p => p.id === u.id) ? prev : [...prev, { id: u.id, username: u.username, status: 'Connecting...' }]);
         const manager = createPeerConnection(u.id, true);
         if (!manager) {
@@ -678,7 +687,7 @@ export const TransferRoom = () => {
 
     if (receiverPipelineRef.current) {
       receiverPipelineRef.current.processChunk(data);
-      setProgress(p => (p >= 98 ? 98 : p + 0.5));
+      // Progress updates are deferred to when transfer completes (set to 100% when done)
     }
   };
 
@@ -686,12 +695,15 @@ export const TransferRoom = () => {
   // 6. SENDER ENGINE (SEQUENTIAL BROADCAST)
   // =========================================
   const startBatchTransfer = async (files: File[]) => {
+    console.log(`[Transfer] Checking peers - peersRef.size: ${peersRef.current.size}, peers state: ${peers.length}`);
+    console.log(`[Transfer] Peer details:`, Array.from(peersRef.current.keys()).map(id => ({ id, status: peers.find(p => p.id === id)?.status })));
+    
     if (peersRef.current.size === 0) {
-      return addToast('error', "Mesh Network Empty. Join a room first.");
-    }
-
-    if (!encryptionReady || keysRef.current.size === 0) {
-      return addToast('error', "Secure handshake not ready yet. Wait for the tunnel to initialize.");
+      const message = isJoined 
+        ? `No peers connected yet. Please wait for other users to join the room "${roomId}" or check your connection.`
+        : 'Please join or create a room first.';
+      addLog(message);
+      return alert(message);
     }
 
     setIsTransferring(true);
@@ -743,95 +755,143 @@ export const TransferRoom = () => {
         addLog(`🤖 Intelligence: Applied ${algoName} Strategy`);
 
         const activePeers = Array.from(peersRef.current.entries());
-        setQueueStatus(`Mesh Broadcast: Sending to ${activePeers.length} peer(s)...`);
-        setProgress(0);
-
-        // Send to all peers in PARALLEL with optimized handling
-        const transferPromises = activePeers.map(async ([peerId, manager], peerIndex) => {
+        console.log(`[Sender] Total peers in network: ${activePeers.length}`);
+        
+        // Helper to check if peer is ready
+        const isPeerReady = (peerId: string, manager: any) => {
           const sharedKey = keysRef.current.get(peerId);
-          if (!sharedKey || !manager.dataChannel || manager.dataChannel.readyState !== 'open') {
-            console.warn(`[Sender] Skipping peer ${peerId} - no key or channel not ready`);
-            return;
-          }
-
-          try {
-            console.log(`[Sender] Sending to peer ${peerIndex + 1}/${activePeers.length}: ${peerId}`);
-
-            // 4. Send Metadata (fire and forget - don't await)
-            const metaObj = { type: 'file-start', name: originalFile.name, algo: algoName, originalSize: meta.originalSize };
-            const startMeta = encoder.encode(JSON.stringify(metaObj));
-            manager.sendData(startMeta.buffer as ArrayBuffer).catch(e => console.error(`[Sender] Metadata send failed for ${peerId}:`, e));
-
-            // 5. Send Binary Pipeline - this is the heavy lifting
-            const transferResult = await sendFilePipeline(processedData as any, sharedKey, algoName, async (chunk) => {
-              try {
-                await manager.sendData(chunk);
-                // Update progress less frequently to reduce render thrashing
-                setProgress(p => (p >= 98 ? 98 : p + 0.3));
-              } catch (e) {
-                console.error(`[Sender] Failed to send chunk to ${peerId}:`, e);
-                throw e;
-              }
-            });
+          const isReady = sharedKey && manager.dataChannel && manager.dataChannel.readyState === 'open';
+          return isReady;
+        };
+        
+        // Wait for peers to be ready with timeout
+        let readyPeers = activePeers.filter(([peerId, manager]) => isPeerReady(peerId, manager));
+        console.log(`[Sender] Initial check - Ready peers: ${readyPeers.length}/${activePeers.length}`);
+        
+        if (readyPeers.length === 0) {
+          console.warn(`[Sender] ⏳ No ready peers found. Waiting for connections to stabilize (max 15 seconds)...`);
+          addLog(`⏳ Waiting for peer connections to stabilize...`);
+          
+          let waitTime = 0;
+          const maxWait = 15000; // 15 seconds
+          const checkInterval = 500; // Check every 500ms
+          
+          while (waitTime < maxWait) {
+            await new Promise(r => setTimeout(r, checkInterval));
+            waitTime += checkInterval;
             
-            // Store speed for later use in stats (average if multiple peers)
-            if (transferSpeedRef.current === 'N/A') {
-              transferSpeedRef.current = String(transferResult.speed);
-            } else {
-              const currentSpeed = parseFloat(transferSpeedRef.current);
-              const newSpeed = parseFloat(String(transferResult.speed));
-              const avgSpeed = ((currentSpeed + newSpeed) / 2).toFixed(2);
-              transferSpeedRef.current = avgSpeed;
+            readyPeers = activePeers.filter(([peerId, manager]) => isPeerReady(peerId, manager));
+            
+            if (readyPeers.length > 0) {
+              console.log(`[Sender] ✅ Peers ready after ${waitTime}ms: ${readyPeers.length} peers`);
+              break;
             }
-
-            // 6. Handle backpressure asynchronously (don't block other transfers)
-            // @ts-ignore
-            if (manager.dataChannel?.bufferedAmount > 0) {
-              await new Promise(r => {
-                const checkBuffer = setInterval(() => {
-                  // @ts-ignore
-                  if (manager.dataChannel?.bufferedAmount <= 64 * 1024) {
-                    clearInterval(checkBuffer);
-                    r(null);
-                  }
-                }, 50);
-                // Timeout after 5 seconds to prevent hanging
-                setTimeout(() => { clearInterval(checkBuffer); r(null); }, 5000);
+            
+            // Log status every 2 seconds
+            if (waitTime % 2000 === 0) {
+              console.log(`[Sender] Status check at ${waitTime}ms:`);
+              activePeers.forEach(([peerId, manager]) => {
+                const sharedKey = keysRef.current.get(peerId);
+                const dcState = manager.dataChannel?.readyState || 'N/A';
+                console.log(`  - Peer ${peerId.slice(0, 6)}: sharedKey=${!!sharedKey}, dataChannel=${dcState}`);
               });
             }
-
-            // 7. Send Metadata (End)
-            const endMeta = encoder.encode(JSON.stringify({ type: 'file-end', name: originalFile.name }));
-            manager.sendData(endMeta.buffer as ArrayBuffer).catch(e => console.error(`[Sender] End metadata failed for ${peerId}:`, e));
-
-            console.log(`[Sender] File sent to peer ${peerId}`);
-
-            // Wait for ACK from this peer (with timeout)
-            await new Promise<void>(resolve => {
-              const check = setInterval(() => {
-                if (lastAckRef.current === originalFile.name) { clearInterval(check); resolve(); }
-              }, 150);
-              setTimeout(() => { clearInterval(check); resolve(); }, 15000);
-            });
-
-            lastAckRef.current = '';
-          } catch (error) {
-            console.error(`[Sender] Error sending to peer ${peerId}:`, error);
           }
-        });
+          
+          if (readyPeers.length === 0) {
+            console.error(`[Sender] ❌ Timeout: No peers ready after ${maxWait}ms`);
+            activePeers.forEach(([peerId, manager]) => {
+              const sharedKey = keysRef.current.get(peerId);
+              console.error(`  Final state - Peer ${peerId.slice(0, 6)}: sharedKey=${!!sharedKey}, dataChannel=${manager.dataChannel?.readyState || 'N/A'}`);
+            });
+            addLog(`❌ Transfer Failed: Connections could not stabilize`);
+            setIsTransferring(false);
+            setQueueStatus('');
+            setProgress(0);
+            return;
+          }
+        }
 
-        // Wait for all peers to receive the file
-        await Promise.all(transferPromises);
+        let peerCount = 1;
 
-        // 6. Update Stats for Sender (Using unified compression stats utility)
-        const stats = getCompressionStats(meta.originalSize, meta.compressedSize);
-        setTransferStats({
-          originalSize: stats.originalSize,
-          finalSize: stats.compressedSize,
-          speed: transferSpeedRef.current,
-          compressionPercent: stats.compressionPercent,
-          compressionRatio: stats.compressionRatio
-        });
+        for (const [peerId, manager] of readyPeers) {
+          const sharedKey = keysRef.current.get(peerId);
+          if (!sharedKey || !manager.dataChannel || manager.dataChannel.readyState !== 'open') {
+            console.warn(`[Sender] Skipping peer ${peerId} - not ready`);
+            continue;
+          }
+
+          console.log(`[Sender] Starting transfer to peer ${peerCount}/${readyPeers.length}`);
+          setQueueStatus(`Mesh Broadcast: Target ${peerCount}/${readyPeers.length}...`);
+          setProgress(0);
+
+          // 4. Send Metadata (with original file size for compression percentage calculation)
+          setTransferStage('encrypting');
+          const metaObj = { type: 'file-start', name: originalFile.name, algo: algoName, originalSize: meta.originalSize };
+          console.log(`[Sender] Sending file-start metadata:`, metaObj);
+          const startMeta = encoder.encode(JSON.stringify(metaObj));
+          await manager.sendData(startMeta.buffer as ArrayBuffer);
+          setTransferStage('encrypted');
+
+          // 5. Send Binary Pipeline
+          setTransferStage('transferring');
+          console.log(`[Sender] Starting file pipeline for peer ${peerCount}`);
+          const transferResult = await sendFilePipeline(processedData as any, sharedKey, algoName, async (chunk) => {
+            if (!manager.dataChannel || manager.dataChannel.readyState !== 'open') {
+              console.error(`[Sender] Data channel closed during transfer to peer ${peerCount}`);
+              throw new Error('Data channel closed');
+            }
+            try {
+              await manager.sendData(chunk);
+              // Progress updates are deferred to final progress bar update
+            } catch (err) {
+              console.error(`[Sender] Error sending chunk to peer ${peerCount}:`, err);
+              throw err;
+            }
+          });
+          console.log(`[Sender] File pipeline complete for peer ${peerCount}:`, transferResult);
+          setTransferStage('transferred');
+          setProgress(100);
+
+          // 6. Update Stats for Sender (Using unified compression stats utility)
+          const stats = getCompressionStats(meta.originalSize, meta.compressedSize);
+          setTransferStats({
+            originalSize: stats.originalSize,
+            finalSize: stats.compressedSize,
+            speed: transferResult.speed,
+            compressionPercent: stats.compressionPercent,
+            compressionRatio: stats.compressionRatio
+          });
+
+          // Backpressure
+          console.log(`[Sender] Waiting for buffered data to flush (buffered: ${manager.dataChannel?.bufferedAmount || 0} bytes)`);
+          // @ts-ignore
+          while (manager.dataChannel?.bufferedAmount > 0) await new Promise(r => setTimeout(r, 100));
+
+          // 7. Send Metadata (End)
+          console.log(`[Sender] Sending file-end metadata for peer ${peerCount}`);
+          const endMeta = encoder.encode(JSON.stringify({ type: 'file-end', name: originalFile.name }));
+          await manager.sendData(endMeta.buffer as ArrayBuffer);
+
+          addLog(`Verifying integrity with Peer ${peerCount}...`);
+          await new Promise<void>(resolve => {
+            const check = setInterval(() => {
+              if (lastAckRef.current === originalFile.name) { 
+                console.log(`[Sender] Received ACK from peer ${peerCount}`);
+                clearInterval(check); 
+                resolve(); 
+              }
+            }, 150);
+            setTimeout(() => { 
+              console.log(`[Sender] ACK timeout for peer ${peerCount}`);
+              clearInterval(check); 
+              resolve(); 
+            }, 10000);
+          });
+
+          lastAckRef.current = '';
+          peerCount++;
+        }
 
         addLog(`✅ Mesh Broadcast Complete: "${originalFile.name}" sent to ${activePeers.length} peer(s)`);
         setProgress(100);
@@ -839,8 +899,8 @@ export const TransferRoom = () => {
       setQueueStatus('');
       addLog("Pipeline Empty - Batch Finished");
     } catch (e) {
-      console.error(e);
-      addLog("❌ Pipeline Error - Transfer Aborted");
+      console.error(`[Sender] Pipeline error:`, e);
+      addLog(`❌ Pipeline Error - Transfer Aborted`);
     } finally {
       setIsTransferring(false);
       setProgress(0);
@@ -1035,6 +1095,11 @@ export const TransferRoom = () => {
 
           {/* FILE SELECTION PIPELINE */}
           <div className="relative z-10 group">
+            {/* DEBUG: State Inspector */}
+            {/* <div className="text-[10px] text-gray-600 font-mono mb-2">
+              Debug: Peers={peers.length}, Transferring={isTransferring ? 'YES' : 'NO'}, Encrypted={encryptionReady ? 'YES' : 'NO'}
+            </div> */}
+
             {queueStatus && (
               <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-4 bg-blue-500/10 border border-blue-500/20 p-4 rounded-2xl flex items-center justify-center gap-4 shadow-xl backdrop-blur-md">
                 <Loader2 className="animate-spin text-blue-400 w-5 h-5" />
@@ -1044,7 +1109,7 @@ export const TransferRoom = () => {
             <div className={clsx("transition-all duration-500", isTransferring ? "opacity-50 blur-sm pointer-events-none scale-95" : "opacity-100")}>
               <FilePicker
                 onFilesSelected={startBatchTransfer}
-                disabled={!isJoined || peers.length === 0 || isTransferring}
+                disabled={peers.length === 0 || isTransferring}
               />
             </div>
           </div>

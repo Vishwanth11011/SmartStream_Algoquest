@@ -14,14 +14,8 @@ export class WebRTCManager {
   private targetId: string;
   private onData: (data: ArrayBuffer) => void;
   private onStateChange: (state: string) => void;
-  // Dynamic Buffer Control (Safe Defaults)
-  private bufferLimit: number = 1024 * 1024; // 1MB (Safe)
-  private bufferThreshold: number = 64 * 1024; // 64KB (Conservative)
-
-  // TURBO MODE (Parallel Channels)
-  private turboChannels: RTCDataChannel[] = [];
-  private isTurbo: boolean = false;
-  private currentChannelIndex: number = 0;
+  private signalQueue: any[] = [];
+  private remoteDescriptionSet = false;
 
   constructor(socket: Socket, targetId: string, onData: (data: ArrayBuffer) => void, onStateChange: (state: string) => void) {
     this.socket = socket;
@@ -30,77 +24,205 @@ export class WebRTCManager {
     this.onStateChange = onStateChange;
 
     this.peerConnection = new RTCPeerConnection(ICE_SERVERS);
+    console.log(`[WebRTC] Created peer connection for ${targetId}`);
 
-    // 1. ICE Candidate Exchange
+    // 1. ICE Candidate Exchange (with batching)
+    let iceCandidateQueue: any[] = [];
+    let iceTimeout: any = null;
+    
     this.peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        this.socket.emit('signal', {
-          target: this.targetId,
-          payload: { type: 'ice-candidate', candidate: event.candidate }
-        });
+        console.log(`[WebRTC] ICE candidate generated for ${targetId}`);
+        iceCandidateQueue.push(event.candidate);
+        
+        // Batch send candidates every 50ms to reduce overhead
+        if (!iceTimeout) {
+          iceTimeout = setTimeout(() => {
+            if (iceCandidateQueue.length > 0) {
+              console.log(`[WebRTC] Sending ${iceCandidateQueue.length} ICE candidates for ${targetId}`);
+              iceCandidateQueue.forEach(candidate => {
+                this.socket.emit('signal', { 
+                  target: this.targetId, 
+                  payload: { type: 'ice-candidate', candidate } 
+                });
+              });
+              iceCandidateQueue = [];
+            }
+            iceTimeout = null;
+          }, 50);
+        }
+      } else {
+        console.log(`[WebRTC] ICE gathering complete for ${targetId}`);
+        // Send any remaining candidates
+        if (iceTimeout) clearTimeout(iceTimeout);
+        if (iceCandidateQueue.length > 0) {
+          console.log(`[WebRTC] Sending final ${iceCandidateQueue.length} ICE candidates for ${targetId}`);
+          iceCandidateQueue.forEach(candidate => {
+            this.socket.emit('signal', { 
+              target: this.targetId, 
+              payload: { type: 'ice-candidate', candidate } 
+            });
+          });
+          iceCandidateQueue = [];
+        }
       }
     };
 
     // 2. Connection State Monitoring
     this.peerConnection.onconnectionstatechange = () => {
-      this.onStateChange(this.peerConnection.connectionState);
+      const state = this.peerConnection.connectionState;
+      console.log(`[WebRTC] Connection state change for ${targetId}: ${state}`);
+      console.log(`[WebRTC]   - ICE connection state: ${this.peerConnection.iceConnectionState}`);
+      console.log(`[WebRTC]   - Signaling state: ${this.peerConnection.signalingState}`);
+      this.onStateChange(state);
     };
 
-    // 3. Receiver: Handle incoming channel creation from Peer
-    this.peerConnection.ondatachannel = (event) => {
-      // If label starts with 'turbo-', add to turbo pool
-      if (event.channel.label.startsWith('turbo-')) {
-        console.log(`[WebRTC] Received Turbo Channel: ${event.channel.label}`);
-        this.setupTurboChannel(event.channel);
-      } else {
-        this.setupDataChannel(event.channel);
+    // 2b. Signaling State Monitoring
+    this.peerConnection.onsignalingstatechange = () => {
+      const state = this.peerConnection.signalingState;
+      console.log(`[WebRTC] Signaling state change for ${targetId}: ${state}`);
+    };
+
+    // 3. ICE Connection State Monitoring
+    this.peerConnection.oniceconnectionstatechange = () => {
+      const state = this.peerConnection.iceConnectionState;
+      console.log(`[WebRTC] ICE connection state change for ${targetId}: ${state}`);
+      console.log(`[WebRTC]   - Connection state: ${this.peerConnection.connectionState}`);
+      
+      // Only report connection as failed if ICE is truly failed (not just gathering/checking)
+      if (state === 'failed') {
+        console.error(`[WebRTC] ❌ ICE connection FAILED for ${targetId}`);
+        // Give it a moment before reporting failure, in case it recovers
+        setTimeout(() => {
+          if (this.peerConnection.iceConnectionState === 'failed') {
+            console.error(`[WebRTC] ICE failure confirmed for ${targetId}`);
+          }
+        }, 1000);
       }
+    };
+
+    // 4. Receiver: Handle incoming channel creation from Peer
+    this.peerConnection.ondatachannel = (event) => {
+      console.log(`[WebRTC] Data channel received from ${targetId}, label: ${event.channel.label}`);
+      this.setupDataChannel(event.channel);
     };
   }
 
   // Sender: Initialize connection
   public async initConnection(isInitiator: boolean) {
     if (isInitiator) {
-      // ✅ 'ordered: true' ensures bits don't arrive shuffled (essential for PDF/IPYNB)
-      const channel = this.peerConnection.createDataChannel("file-transfer", {
-        ordered: true
-      });
-      this.setupDataChannel(channel);
+      try {
+        console.log(`[WebRTC] Initializing as INITIATOR for ${this.targetId}`);
+        
+        // ✅ 'ordered: true' ensures bits don't arrive shuffled (essential for PDF/IPYNB)
+        const channel = this.peerConnection.createDataChannel("file-transfer", { 
+          ordered: true 
+        });
+        console.log(`[WebRTC] Data channel created for ${this.targetId}`);
+        this.setupDataChannel(channel);
+        
+        console.log(`[WebRTC] Creating offer for ${this.targetId}`);
+        const offer = await this.peerConnection.createOffer();
+        console.log(`[WebRTC] Offer created, setting as local description`);
+        await this.peerConnection.setLocalDescription(offer);
+        
+        console.log(`[WebRTC] Sending offer to ${this.targetId}`);
+        this.socket.emit('signal', { 
+          target: this.targetId, 
+          payload: { type: 'offer', sdp: { type: offer.type, sdp: offer.sdp } } 
+        });
+      } catch (error) {
+        console.error(`[WebRTC] Error initializing connection for ${this.targetId}:`, error);
+      }
+    }
+  }
 
-      const offer = await this.peerConnection.createOffer();
-      await this.peerConnection.setLocalDescription(offer);
-
-      this.socket.emit('signal', {
-        target: this.targetId,
-        payload: { type: 'offer', sdp: offer }
-      });
+  private async processSignalQueue() {
+    while (this.signalQueue.length > 0 && this.remoteDescriptionSet) {
+      const signal = this.signalQueue.shift();
+      console.log(`[WebRTC] Processing queued signal: ${signal.type} for ${this.targetId}`);
+      try {
+        if (signal.type === 'ice-candidate' && signal.candidate) {
+          await this.peerConnection.addIceCandidate(signal.candidate);
+        }
+      } catch (e) {
+        console.warn(`[WebRTC] Failed to process queued signal:`, e);
+      }
     }
   }
 
   public async handleSignal(payload: any) {
     try {
+      console.log(`[WebRTC] Received signal type: ${payload.type} for ${this.targetId}`);
+      
       if (payload.type === 'offer') {
-        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+        console.log(`[WebRTC] Processing OFFER from ${this.targetId}`);
+        const sdp = payload.sdp;
+        const sdpString = typeof sdp === 'string' ? sdp : sdp.sdp;
+        console.log(`[WebRTC] Setting remote description with SDP type: offer, length: ${sdpString.length}`);
+        
+        await this.peerConnection.setRemoteDescription({ 
+          type: 'offer', 
+          sdp: sdpString
+        });
+        this.remoteDescriptionSet = true;
+        console.log(`[WebRTC] Remote description set successfully`);
+        
+        // Process any queued ICE candidates
+        await this.processSignalQueue();
+        
+        console.log(`[WebRTC] Creating answer for ${this.targetId}`);
         const answer = await this.peerConnection.createAnswer();
+        console.log(`[WebRTC] Answer created, setting as local description`);
         await this.peerConnection.setLocalDescription(answer);
-
-        this.socket.emit('signal', {
-          target: this.targetId,
-          payload: { type: 'answer', sdp: answer }
+        console.log(`[WebRTC] Local description set, sending answer back`);
+        
+        console.log(`[WebRTC] Sending answer to ${this.targetId}`);
+        this.socket.emit('signal', { 
+          target: this.targetId, 
+          payload: { type: 'answer', sdp: { type: answer.type, sdp: answer.sdp } } 
         });
       }
       else if (payload.type === 'answer') {
-        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-      }
+        console.log(`[WebRTC] Processing ANSWER from ${this.targetId}`);
+        const sdp = payload.sdp;
+        const sdpString = typeof sdp === 'string' ? sdp : sdp.sdp;
+        console.log(`[WebRTC] Setting remote description with SDP type: answer, length: ${sdpString.length}`);
+        
+        await this.peerConnection.setRemoteDescription({ 
+          type: 'answer', 
+          sdp: sdpString
+        });
+        this.remoteDescriptionSet = true;
+        console.log(`[WebRTC] Remote description (answer) set successfully`);
+        
+        // Process any queued ICE candidates
+        await this.processSignalQueue();
+      } 
       else if (payload.type === 'ice-candidate') {
-        await this.peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        if (!this.remoteDescriptionSet) {
+          // Queue ICE candidates until remote description is set
+          console.log(`[WebRTC] Queueing ICE candidate (waiting for remote description)`);
+          this.signalQueue.push(payload);
+        } else {
+          if (payload.candidate) {
+            console.log(`[WebRTC] Adding ICE candidate for ${this.targetId}`);
+            try {
+              await this.peerConnection.addIceCandidate(payload.candidate);
+              console.log(`[WebRTC] ICE candidate added successfully`);
+            } catch (e) {
+              console.warn(`[WebRTC] Failed to add ICE candidate:`, e);
+            }
+          }
+        }
       }
     } catch (error) {
-      console.error("WebRTC Signaling Error:", error);
+      console.error(`[WebRTC] Signaling Error for ${this.targetId}:`, error);
     }
   }
 
   private setupDataChannel(channel: RTCDataChannel) {
+    console.log(`[WebRTC] Setting up data channel for ${this.targetId}, label: ${channel.label}, id: ${channel.id}`);
     this.dataChannel = channel;
 
     // ✅ CRITICAL: Force Binary Type to 'arraybuffer' to prevent corruption
@@ -109,11 +231,29 @@ export class WebRTCManager {
     // Set initial threshold
     this.dataChannel.bufferedAmountLowThreshold = this.bufferThreshold;
 
-    this.dataChannel.onopen = () => this.onStateChange('connected');
-    this.dataChannel.onclose = () => this.onStateChange('disconnected');
-
+    this.dataChannel.onopen = () => {
+      console.log(`[WebRTC] ✅ Data channel OPENED for ${this.targetId}, readyState: ${this.dataChannel?.readyState}`);
+      this.onStateChange('connected');
+    };
+    
+    this.dataChannel.onclose = () => {
+      console.log(`[WebRTC] ❌ Data channel CLOSED for ${this.targetId}`);
+      this.onStateChange('disconnected');
+    };
+    
+    this.dataChannel.onerror = (error) => {
+      console.error(`[WebRTC] ❌ Data channel ERROR for ${this.targetId}:`, error.error);
+    };
+    
+    // Monitor bufferedAmount changes
+    this.dataChannel.onbufferedamountlow = () => {
+      console.log(`[WebRTC] Buffered amount low for ${this.targetId}: ${this.dataChannel?.bufferedAmount} bytes`);
+    };
+    
     // Receiver: Direct raw data to the handler
     this.dataChannel.onmessage = (e) => {
+      const size = e.data instanceof ArrayBuffer ? e.data.byteLength : 'unknown';
+      console.log(`[WebRTC] Received message from ${this.targetId}, size: ${size} bytes`);
       if (e.data instanceof ArrayBuffer) {
         this.onData(e.data);
       } else {
@@ -178,28 +318,31 @@ export class WebRTCManager {
   // ✅ OPTIMIZED SEND LOGIC (Event-Driven Backpressure)
   // This prevents browser memory from overflowing and corrupting the stream
   public async sendData(data: ArrayBuffer): Promise<void> {
-    if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
-      console.warn("Attempted to send data while channel was not open.");
-      return;
+    if (!this.dataChannel) {
+      console.error(`[WebRTC] No data channel available for ${this.targetId}`);
+      throw new Error(`No data channel for ${this.targetId}`);
     }
 
-    // If browser buffer is dangerously full (>limit), pause and wait
-    // Turbo Mode: Check ALL channels or just the current one? 
-    // Strategy: Round-Robin Load Balancing
-
-    let targetChannel = this.dataChannel;
-
-    if (this.isTurbo && this.turboChannels.length > 0) {
-      // Round Robin Selection
-      const pool = [this.dataChannel!, ...this.turboChannels];
-      targetChannel = pool[this.currentChannelIndex] || this.dataChannel;
-      this.currentChannelIndex = (this.currentChannelIndex + 1) % pool.length;
+    const readyState = this.dataChannel.readyState;
+    if (readyState !== 'open') {
+      console.error(`[WebRTC] Data channel not open for ${this.targetId}, state: ${readyState}`);
+      throw new Error(`Data channel not open: ${readyState}`);
     }
 
-    if (targetChannel && targetChannel.bufferedAmount > this.bufferLimit) {
-      await new Promise<void>(resolve => {
+    // If browser buffer is dangerously full (>1MB), pause and wait
+    if (this.dataChannel.bufferedAmount > 1024 * 1024) {
+      console.warn(`[WebRTC] Backpressure detected for ${this.targetId}, buffered: ${this.dataChannel.bufferedAmount} bytes`);
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          console.error(`[WebRTC] Backpressure timeout for ${this.targetId}`);
+          this.dataChannel?.removeEventListener('bufferedamountlow', onLow);
+          reject(new Error('Backpressure timeout'));
+        }, 30000); // 30 second timeout
+        
         const onLow = () => {
-          targetChannel?.removeEventListener('bufferedamountlow', onLow);
+          clearTimeout(timeout);
+          console.log(`[WebRTC] Backpressure relieved for ${this.targetId}`);
+          this.dataChannel?.removeEventListener('bufferedamountlow', onLow);
           resolve();
         };
         targetChannel?.addEventListener('bufferedamountlow', onLow);
@@ -209,7 +352,8 @@ export class WebRTCManager {
     try {
       targetChannel?.send(data);
     } catch (e) {
-      console.error(`Transmission failure to ${this.targetId}:`, e);
+      console.error(`[WebRTC] Transmission failure to ${this.targetId}:`, e);
+      throw e;
     }
   }
 
