@@ -149,7 +149,7 @@ export const TransferRoom = () => {
   const [encryptionReady, setEncryptionReady] = useState(false);
   const [, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
-  const [receivedFiles, setReceivedFiles] = useState<{ name: string, url: string }[]>([]);
+  const [receivedFiles, setReceivedFiles] = useState<{ name: string, url: string, timestamp: number }[]>([]);
   const [transferStats, setTransferStats] = useState<any>(null);
   const [queueStatus, setQueueStatus] = useState('');
   const [advancedStats, setAdvancedStats] = useState<any>(null);
@@ -227,6 +227,15 @@ export const TransferRoom = () => {
       } else {
         alert("Room not found! Please check the ID.");
       }
+    });
+
+    // NEW: Handle Room Users Sync (Remove stale users)
+    socket.on('room-users-sync', (users: { id: string, username: string }[]) => {
+      setPeers(prev => {
+        const validIds = new Set(users.map(u => u.id));
+        // Only keep peers that are in the server's list
+        return prev.filter(p => validIds.has(p.id));
+      });
     });
 
     socket.on('user-status', (data: any) => {
@@ -316,7 +325,8 @@ export const TransferRoom = () => {
       socket.off('user-joined');
       socket.off('existing-users');
       socket.off('user-left');
-      socket.off('room-exists'); // Clean up listener
+      socket.off('room-exists');
+      socket.off('room-users-sync'); // Clean up
       socket.off('user-status');
       socket.off('connect');
       socket.off('disconnect');
@@ -337,6 +347,15 @@ export const TransferRoom = () => {
     }, 500);
     return () => clearTimeout(delayDebounceFn);
   }, [searchQuery, username]);
+
+  // --- SYNC: KEEP ROOM STATE FRESH ---
+  useEffect(() => {
+    if (!isJoined || !roomId) return;
+    const interval = setInterval(() => {
+      socket.emit('sync-room-users', roomId);
+    }, 5000); // 5 seconds
+    return () => clearInterval(interval);
+  }, [isJoined, roomId]);
 
   // =========================================
   // 4. USER INTERACTION HANDLERS
@@ -521,7 +540,8 @@ export const TransferRoom = () => {
                 const finalName = msg.name.replace(/\.gz$/, "").replace(/\.br$/, "").replace(/\.deflate$/, "");
                 const url = URL.createObjectURL(correctedBlob);
 
-                setReceivedFiles(prev => [{ name: finalName, url }, ...prev]);
+                // NEW: Add timestamp
+                setReceivedFiles(prev => [{ name: finalName, url, timestamp: Date.now() }, ...prev]);
                 setTransferStage('complete');
                 console.log(`[Receiver] File ready for download: ${finalName}`);
 
@@ -963,7 +983,7 @@ export const TransferRoom = () => {
                   >
                     <div className="flex flex-col overflow-hidden">
                       <span className="text-sm text-gray-200 truncate w-40 font-bold tracking-tight">{f.name}</span>
-                      <span className="text-[9px] text-gray-600 font-mono italic">{new Date().toLocaleTimeString()} • Verified</span>
+                      <span className="text-[9px] text-gray-600 font-mono italic">{new Date(f.timestamp).toLocaleTimeString()} • Verified</span>
                     </div>
                     <a
                       href={f.url} download={f.name}

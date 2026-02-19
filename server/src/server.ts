@@ -248,6 +248,13 @@ io.on('connection', (socket) => {
     }
   });
 
+  // H. Sync Room Users (Periodic Refresh)
+  socket.on('sync-room-users', (roomId: string) => {
+    if (roomUsers[roomId]) {
+      socket.emit('room-users-sync', roomUsers[roomId]);
+    }
+  });
+
   // E. Disconnect & Cleanup
   socket.on('disconnect', () => {
     const username = socketToUsername.get(socket.id);
