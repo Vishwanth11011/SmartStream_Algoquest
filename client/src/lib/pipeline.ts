@@ -1,6 +1,6 @@
 import { encryptChunk, decryptChunk } from './crypto';
 
-const DESIRED_CHUNK_SIZE = 512 * 1024; // Increased to 512KB for better speed 
+const DESIRED_CHUNK_SIZE = 128 * 1024; // Reverted to 128KB for stability on all networks 
 
 // ✅ FIX: Accepts 'Blob' to prevent file property errors
 export const sendFilePipeline = async (

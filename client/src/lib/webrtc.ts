@@ -92,7 +92,7 @@ export class WebRTCManager {
     // ✅ CRITICAL: Force Binary Type to 'arraybuffer' to prevent corruption
     this.dataChannel.binaryType = 'arraybuffer';
 
-    // Set threshold for backpressure (512KB)
+    // Set threshold for backpressure (512KB) - Wake up sooner to keep pipe full
     this.dataChannel.bufferedAmountLowThreshold = 512 * 1024;
 
     this.dataChannel.onopen = () => this.onStateChange('connected');
@@ -122,8 +122,9 @@ export class WebRTCManager {
       return;
     }
 
-    // If browser buffer is dangerously full (>4MB), pause and wait
-    if (this.dataChannel.bufferedAmount > 4 * 1024 * 1024) {
+    // If browser buffer is dangerously full (>8MB), pause and wait
+    // Increased to 8MB to allow more in-flight data (high throughput) without crashing
+    if (this.dataChannel.bufferedAmount > 8 * 1024 * 1024) {
       await new Promise<void>(resolve => {
         const onLow = () => {
           this.dataChannel?.removeEventListener('bufferedamountlow', onLow);
