@@ -14,6 +14,8 @@ export class WebRTCManager {
   private targetId: string;
   private onData: (data: ArrayBuffer) => void;
   private onStateChange: (state: string) => void;
+  private signalQueue: any[] = [];
+  private remoteDescriptionSet = false;
 
   constructor(socket: Socket, targetId: string, onData: (data: ArrayBuffer) => void, onStateChange: (state: string) => void) {
     this.socket = socket;
@@ -24,16 +26,45 @@ export class WebRTCManager {
     this.peerConnection = new RTCPeerConnection(ICE_SERVERS);
     console.log(`[WebRTC] Created peer connection for ${targetId}`);
 
-    // 1. ICE Candidate Exchange
+    // 1. ICE Candidate Exchange (with batching)
+    let iceCandidateQueue: any[] = [];
+    let iceTimeout: any = null;
+    
     this.peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
         console.log(`[WebRTC] ICE candidate generated for ${targetId}`);
-        this.socket.emit('signal', { 
-          target: this.targetId, 
-          payload: { type: 'ice-candidate', candidate: event.candidate } 
-        });
+        iceCandidateQueue.push(event.candidate);
+        
+        // Batch send candidates every 50ms to reduce overhead
+        if (!iceTimeout) {
+          iceTimeout = setTimeout(() => {
+            if (iceCandidateQueue.length > 0) {
+              console.log(`[WebRTC] Sending ${iceCandidateQueue.length} ICE candidates for ${targetId}`);
+              iceCandidateQueue.forEach(candidate => {
+                this.socket.emit('signal', { 
+                  target: this.targetId, 
+                  payload: { type: 'ice-candidate', candidate } 
+                });
+              });
+              iceCandidateQueue = [];
+            }
+            iceTimeout = null;
+          }, 50);
+        }
       } else {
         console.log(`[WebRTC] ICE gathering complete for ${targetId}`);
+        // Send any remaining candidates
+        if (iceTimeout) clearTimeout(iceTimeout);
+        if (iceCandidateQueue.length > 0) {
+          console.log(`[WebRTC] Sending final ${iceCandidateQueue.length} ICE candidates for ${targetId}`);
+          iceCandidateQueue.forEach(candidate => {
+            this.socket.emit('signal', { 
+              target: this.targetId, 
+              payload: { type: 'ice-candidate', candidate } 
+            });
+          });
+          iceCandidateQueue = [];
+        }
       }
     };
 
@@ -106,6 +137,20 @@ export class WebRTCManager {
     }
   }
 
+  private async processSignalQueue() {
+    while (this.signalQueue.length > 0 && this.remoteDescriptionSet) {
+      const signal = this.signalQueue.shift();
+      console.log(`[WebRTC] Processing queued signal: ${signal.type} for ${this.targetId}`);
+      try {
+        if (signal.type === 'ice-candidate' && signal.candidate) {
+          await this.peerConnection.addIceCandidate(signal.candidate);
+        }
+      } catch (e) {
+        console.warn(`[WebRTC] Failed to process queued signal:`, e);
+      }
+    }
+  }
+
   public async handleSignal(payload: any) {
     try {
       console.log(`[WebRTC] Received signal type: ${payload.type} for ${this.targetId}`);
@@ -120,7 +165,11 @@ export class WebRTCManager {
           type: 'offer', 
           sdp: sdpString
         });
+        this.remoteDescriptionSet = true;
         console.log(`[WebRTC] Remote description set successfully`);
+        
+        // Process any queued ICE candidates
+        await this.processSignalQueue();
         
         console.log(`[WebRTC] Creating answer for ${this.targetId}`);
         const answer = await this.peerConnection.createAnswer();
@@ -144,16 +193,26 @@ export class WebRTCManager {
           type: 'answer', 
           sdp: sdpString
         });
+        this.remoteDescriptionSet = true;
         console.log(`[WebRTC] Remote description (answer) set successfully`);
+        
+        // Process any queued ICE candidates
+        await this.processSignalQueue();
       } 
       else if (payload.type === 'ice-candidate') {
-        if (payload.candidate) {
-          console.log(`[WebRTC] Adding ICE candidate for ${this.targetId}`);
-          try {
-            await this.peerConnection.addIceCandidate(payload.candidate);
-            console.log(`[WebRTC] ICE candidate added successfully`);
-          } catch (e) {
-            console.warn(`[WebRTC] Failed to add ICE candidate:`, e);
+        if (!this.remoteDescriptionSet) {
+          // Queue ICE candidates until remote description is set
+          console.log(`[WebRTC] Queueing ICE candidate (waiting for remote description)`);
+          this.signalQueue.push(payload);
+        } else {
+          if (payload.candidate) {
+            console.log(`[WebRTC] Adding ICE candidate for ${this.targetId}`);
+            try {
+              await this.peerConnection.addIceCandidate(payload.candidate);
+              console.log(`[WebRTC] ICE candidate added successfully`);
+            } catch (e) {
+              console.warn(`[WebRTC] Failed to add ICE candidate:`, e);
+            }
           }
         }
       }

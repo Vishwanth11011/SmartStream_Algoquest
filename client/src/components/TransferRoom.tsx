@@ -300,16 +300,14 @@ export const TransferRoom = () => {
       console.log(`[Socket] User joined: ${username} (${id})`);
       addLog(`${username} entered the mesh.`);
       setPeers(prev => prev.find(p => p.id === id) ? prev : [...prev, { id, username, status: 'Connecting...' }]);
-      const manager = createPeerConnection(id, false);
-      if (!manager) {
-        console.error(`Failed to create peer connection for new user ${id}`);
-      }
+      // NEW USER: Let them initiate connections (we wait for their offer)
+      console.log(`[Socket] New user ${id} will initiate connection to us...`);
     });
 
     socket.on('existing-users', (users) => {
       console.log(`[Socket] Existing users received: ${users.length} users`);
       users.forEach((u: any) => {
-        console.log(`[Socket] Creating initiator connection to ${u.username} (${u.id})`);
+        console.log(`[Socket] WE (new user) will initiate to existing user: ${u.username} (${u.id})`);
         setPeers(prev => prev.find(p => p.id === u.id) ? prev : [...prev, { id: u.id, username: u.username, status: 'Connecting...' }]);
         const manager = createPeerConnection(u.id, true);
         if (!manager) {
