@@ -66,7 +66,7 @@ export class WebRTCManager {
   public async handleSignal(payload: any) {
     try {
       if (payload.type === 'offer') {
-        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+        await this.peerConnection.setRemoteDescription({ type: 'offer', sdp: payload.sdp.sdp });
         const answer = await this.peerConnection.createAnswer();
         await this.peerConnection.setLocalDescription(answer);
         
@@ -76,10 +76,12 @@ export class WebRTCManager {
         });
       } 
       else if (payload.type === 'answer') {
-        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+        await this.peerConnection.setRemoteDescription({ type: 'answer', sdp: payload.sdp.sdp });
       } 
       else if (payload.type === 'ice-candidate') {
-        await this.peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        if (payload.candidate) {
+          await this.peerConnection.addIceCandidate(payload.candidate);
+        }
       }
     } catch (error) {
       console.error("WebRTC Signaling Error:", error);

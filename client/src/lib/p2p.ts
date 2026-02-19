@@ -218,10 +218,10 @@ export class P2PManager {
     }, 10000);
 
     // Monitor ICE connection state
+    let iceFailureTimeout: any = null;
     conn.peerConnection.oniceconnectionstatechange = () => {
       const state = conn.peerConnection.iceConnectionState;
       console.log(`❄️ ICE State: ${state}`);
-      let iceFailureTimeout: any = null;
       switch(state) {
         case 'checking':
           console.log('🔍 ICE is checking candidates...');
@@ -275,10 +275,8 @@ export class P2PManager {
     };
 
     conn.on('open', () => {
-      let iceFailureTimeout: any = null;
       console.log("🤝 ✅✅✅ Connection Open! Data channel is ready! ✅✅✅");
       connectionEstablished = true;
-      clearTimeout(iceFailureTimeout);
       clearTimeout(forceConnectionTimeout);
       this.onConnect();
     });
@@ -289,9 +287,7 @@ export class P2PManager {
     });
 
     conn.on('error', (err) => {
-      let iceFailureTimeout: any = null;
       console.error("❌ Connection Error:", err);
-      clearTimeout(iceFailureTimeout);
       clearTimeout(forceConnectionTimeout);
       this.onError(`Connection Error: ${err}`);
     });
