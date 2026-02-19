@@ -188,10 +188,15 @@ export const TransferRoom = () => {
               socket.emit('signal', { target: targetId, payload: { type: 'pub-key', key: k } });
             });
           }
-        } else if (state === 'failed' || state === 'closed' || state === 'disconnected') {
+        } else if (state === 'failed' || state === 'closed') {
+          // Only delete on permanent failure or closed states, not on temporary disconnections
           console.log(`[createPeerConnection] ❌ Connection ${state} for ${targetId}`);
           peersRef.current.delete(targetId);
           keysRef.current.delete(targetId);
+        }
+        // For 'disconnected' state: don't delete, just wait for reconnection or another signal
+        else if (state === 'disconnected') {
+          console.warn(`[createPeerConnection] ⚠️ Connection disconnected for ${targetId}, keeping peer in map for potential recovery`);
         }
       }
     );

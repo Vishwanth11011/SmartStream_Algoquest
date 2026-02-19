@@ -41,6 +41,8 @@ export class WebRTCManager {
     this.peerConnection.onconnectionstatechange = () => {
       const state = this.peerConnection.connectionState;
       console.log(`[WebRTC] Connection state change for ${targetId}: ${state}`);
+      console.log(`[WebRTC]   - ICE connection state: ${this.peerConnection.iceConnectionState}`);
+      console.log(`[WebRTC]   - Signaling state: ${this.peerConnection.signalingState}`);
       this.onStateChange(state);
     };
 
@@ -54,11 +56,23 @@ export class WebRTCManager {
     this.peerConnection.oniceconnectionstatechange = () => {
       const state = this.peerConnection.iceConnectionState;
       console.log(`[WebRTC] ICE connection state change for ${targetId}: ${state}`);
+      console.log(`[WebRTC]   - Connection state: ${this.peerConnection.connectionState}`);
+      
+      // Only report connection as failed if ICE is truly failed (not just gathering/checking)
+      if (state === 'failed') {
+        console.error(`[WebRTC] ❌ ICE connection FAILED for ${targetId}`);
+        // Give it a moment before reporting failure, in case it recovers
+        setTimeout(() => {
+          if (this.peerConnection.iceConnectionState === 'failed') {
+            console.error(`[WebRTC] ICE failure confirmed for ${targetId}`);
+          }
+        }, 1000);
+      }
     };
 
     // 4. Receiver: Handle incoming channel creation from Peer
     this.peerConnection.ondatachannel = (event) => {
-      console.log(`[WebRTC] Data channel received from ${targetId}`);
+      console.log(`[WebRTC] Data channel received from ${targetId}, label: ${event.channel.label}`);
       this.setupDataChannel(event.channel);
     };
   }
@@ -100,16 +114,19 @@ export class WebRTCManager {
         console.log(`[WebRTC] Processing OFFER from ${this.targetId}`);
         const sdp = payload.sdp;
         const sdpString = typeof sdp === 'string' ? sdp : sdp.sdp;
-        console.log(`[WebRTC] Setting remote description with SDP type: offer`);
+        console.log(`[WebRTC] Setting remote description with SDP type: offer, length: ${sdpString.length}`);
         
         await this.peerConnection.setRemoteDescription({ 
           type: 'offer', 
           sdp: sdpString
         });
+        console.log(`[WebRTC] Remote description set successfully`);
         
         console.log(`[WebRTC] Creating answer for ${this.targetId}`);
         const answer = await this.peerConnection.createAnswer();
+        console.log(`[WebRTC] Answer created, setting as local description`);
         await this.peerConnection.setLocalDescription(answer);
+        console.log(`[WebRTC] Local description set, sending answer back`);
         
         console.log(`[WebRTC] Sending answer to ${this.targetId}`);
         this.socket.emit('signal', { 
@@ -121,18 +138,20 @@ export class WebRTCManager {
         console.log(`[WebRTC] Processing ANSWER from ${this.targetId}`);
         const sdp = payload.sdp;
         const sdpString = typeof sdp === 'string' ? sdp : sdp.sdp;
-        console.log(`[WebRTC] Setting remote description with SDP type: answer`);
+        console.log(`[WebRTC] Setting remote description with SDP type: answer, length: ${sdpString.length}`);
         
         await this.peerConnection.setRemoteDescription({ 
           type: 'answer', 
           sdp: sdpString
         });
+        console.log(`[WebRTC] Remote description (answer) set successfully`);
       } 
       else if (payload.type === 'ice-candidate') {
         if (payload.candidate) {
           console.log(`[WebRTC] Adding ICE candidate for ${this.targetId}`);
           try {
             await this.peerConnection.addIceCandidate(payload.candidate);
+            console.log(`[WebRTC] ICE candidate added successfully`);
           } catch (e) {
             console.warn(`[WebRTC] Failed to add ICE candidate:`, e);
           }
