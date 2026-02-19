@@ -634,12 +634,12 @@ export const TransferRoom = () => {
     setIsTransferring(true);
     const encoder = new TextEncoder();
 
-    // DYNAMIC BUFFER ALLOCATION (SAFE MODE)
-    // 1 Peer = 3MB Limit (Sweet Spot - Fast & Safe)
-    // >1 Peer = 1MB Limit (Conservative - Prevents Mesh Congestion)
+    // DYNAMIC BUFFER ALLOCATION (MAX PERFORMANCE MODE)
+    // 1 Peer = 8MB Limit (High Throughput for Single Lane)
+    // >1 Peer = 1MB Limit (Conservative Mesh Mode)
     const peerCount = peersRef.current.size;
-    const bufferLimit = peerCount === 1 ? 3 * 1024 * 1024 : 1 * 1024 * 1024;
-    const bufferThreshold = peerCount === 1 ? 256 * 1024 : 64 * 1024;
+    const bufferLimit = peerCount === 1 ? 8 * 1024 * 1024 : 1 * 1024 * 1024;
+    const bufferThreshold = peerCount === 1 ? 512 * 1024 : 64 * 1024;
 
     peersRef.current.forEach(manager => {
       // @ts-ignore - method added in webrtc.ts
