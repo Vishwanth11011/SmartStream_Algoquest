@@ -6,7 +6,7 @@ import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
-import { User } from './models/User'; 
+import { User } from './models/User';
 
 // 1. CONFIGURATION
 dotenv.config();
@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '10mb' })); 
+app.use(express.json({ limit: '10mb' }));
 
 // 2. DATABASE CONNECTION (MongoDB Atlas)
 const connectDB = async () => {
@@ -38,7 +38,7 @@ connectDB();
 app.post('/api/auth/register', async (req, res): Promise<any> => {
   try {
     const { username, email, password, fullName, securityQuestion, securityAnswer } = req.body;
-    
+
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) return res.status(400).json({ error: "Invalid email format." });
 
@@ -55,13 +55,13 @@ app.post('/api/auth/register', async (req, res): Promise<any> => {
 
     const newUser = new User({
       username: cleanUsername,
-      email, 
-      password: hashedPassword, 
+      email,
+      password: hashedPassword,
       fullName,
-      securityQuestion, 
+      securityQuestion,
       securityAnswer: hashedAnswer
     });
-    
+
     await newUser.save();
     console.log(`👤 New User Registered: ${cleanUsername}`);
     res.json({ message: "Registered successfully!" });
@@ -84,8 +84,8 @@ app.post('/api/auth/login', async (req, res): Promise<any> => {
     if (!isMatch) return res.status(400).json({ error: "Invalid Credentials" });
 
     const token = jwt.sign(
-      { id: user._id, username: user.username }, 
-      process.env.JWT_SECRET as string, 
+      { id: user._id, username: user.username },
+      process.env.JWT_SECRET as string,
       { expiresIn: '24h' }
     );
 
@@ -149,12 +149,12 @@ app.post('/api/ai/analyze', (req, res) => {
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 1e8 
+  maxHttpBufferSize: 1e8
 });
 
 // Data Structures
-const usernameToSocket = new Map<string, string>(); 
-const socketToUsername = new Map<string, string>(); 
+const usernameToSocket = new Map<string, string>();
+const socketToUsername = new Map<string, string>();
 const roomUsers: Record<string, { id: string, username: string }[]> = {}; // ✅ Tracks Room Membership
 
 io.on('connection', (socket) => {
@@ -165,11 +165,11 @@ io.on('connection', (socket) => {
     const username = rawUsername.trim().toLowerCase();
     const oldSocketId = usernameToSocket.get(username);
     if (oldSocketId && oldSocketId !== socket.id) {
-       socketToUsername.delete(oldSocketId);
+      socketToUsername.delete(oldSocketId);
     }
     usernameToSocket.set(username, socket.id);
     socketToUsername.set(socket.id, username);
-    
+
     console.log(`✅ Registered: ${username} -> ${socket.id}`);
     io.emit('user-online', { users: Array.from(usernameToSocket.keys()).map(u => ({ username: u })) });
   });
@@ -177,7 +177,7 @@ io.on('connection', (socket) => {
   // B. JOIN ROOM (For Multi-Peer Mesh)
   socket.on('join-room', (roomId: string, username: string) => {
     console.log(`[Server] join-room event received: roomId=${roomId}, username=${username}, socketId=${socket.id}`);
-    
+
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.username = username;
@@ -186,11 +186,11 @@ io.on('connection', (socket) => {
       roomUsers[roomId] = [];
       console.log(`[Server] Created new room: ${roomId}`);
     }
-    
+
     // Add to room list if not already there
     if (!roomUsers[roomId].find(u => u.id === socket.id)) {
-        roomUsers[roomId].push({ id: socket.id, username });
-        console.log(`[Server] Added ${username} to room ${roomId}. Room now has ${roomUsers[roomId].length} users`);
+      roomUsers[roomId].push({ id: socket.id, username });
+      console.log(`[Server] Added ${username} to room ${roomId}. Room now has ${roomUsers[roomId].length} users`);
     }
 
     console.log(`📢 ${username} joined Room: ${roomId}`);
@@ -215,12 +215,37 @@ io.on('connection', (socket) => {
   socket.on('check-user', (targetUsername: string) => {
     if (!targetUsername) return;
     const cleanTarget = targetUsername.trim().toLowerCase();
-    const isOnline = usernameToSocket.has(cleanTarget); 
-    
-    socket.emit('user-status', { 
-      username: targetUsername, 
-      status: isOnline ? 'online' : 'offline' 
+    const isOnline = usernameToSocket.has(cleanTarget);
+
+    socket.emit('user-status', {
+      username: targetUsername,
+      status: isOnline ? 'online' : 'offline'
     });
+  });
+
+  // F. Room Existence Check
+  socket.on('check-room', (roomId: string) => {
+    const exists = !!roomUsers[roomId] && roomUsers[roomId].length > 0;
+    socket.emit('room-exists', { roomId, exists });
+  });
+
+  // G. Leave Room
+  socket.on('leave-room', (roomId: string) => {
+    console.log(`[Server] User ${socket.id} is leaving room ${roomId}`);
+    socket.leave(roomId);
+
+    // Explicitly clean up roomUsers
+    if (roomUsers[roomId]) {
+      roomUsers[roomId] = roomUsers[roomId].filter(u => u.id !== socket.id);
+
+      // Notify others that this user left
+      socket.to(roomId).emit('user-left', { id: socket.id });
+
+      // Clean up empty rooms
+      if (roomUsers[roomId].length === 0) {
+        delete roomUsers[roomId];
+      }
+    }
   });
 
   // E. Disconnect & Cleanup
@@ -241,7 +266,7 @@ io.on('connection', (socket) => {
       roomUsers[roomId] = roomUsers[roomId].filter(u => u.id !== socket.id);
       // Notify room members to close that specific connection
       io.to(roomId).emit('user-left', socket.id);
-      
+
       // Clean up empty rooms
       if (roomUsers[roomId].length === 0) {
         delete roomUsers[roomId];

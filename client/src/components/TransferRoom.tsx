@@ -32,7 +32,7 @@ const COLORS = {
 const decompressBlob = async (blob: Blob, algo: string, fileName: string): Promise<Blob> => {
   try {
     console.log(`[Decompress] STARTING - algo: "${algo}", fileName: "${fileName}", blob size: ${blob.size}`);
-    
+
     // 1. If logic said "Store", we do NOT decompress
     if (algo.startsWith('Store')) {
       console.log(`[Decompress] Detected Store algo - returning blob as-is`);
@@ -43,17 +43,17 @@ const decompressBlob = async (blob: Blob, algo: string, fileName: string): Promi
 
     // 2. Check Explicit Algorithm Label
     if (algo.includes('Deflate')) {
-        format = 'deflate';
-        console.log(`[Decompress] Matched "Deflate" - using deflate`);
+      format = 'deflate';
+      console.log(`[Decompress] Matched "Deflate" - using deflate`);
     }
     else if (algo.includes('Gzip')) {
-        format = 'gzip';
-        console.log(`[Decompress] Matched "Gzip" - using gzip`);
+      format = 'gzip';
+      console.log(`[Decompress] Matched "Gzip" - using gzip`);
     }
     // 3. Fallback: Extension
     else if (fileName.endsWith('.gz')) {
-        format = 'gzip';
-        console.log(`[Decompress] Matched .gz extension - using gzip`);
+      format = 'gzip';
+      console.log(`[Decompress] Matched .gz extension - using gzip`);
     }
 
     if (!format) {
@@ -62,29 +62,29 @@ const decompressBlob = async (blob: Blob, algo: string, fileName: string): Promi
     }
 
     console.log(`[Decompress] Using format: ${format}, input size: ${blob.size} bytes`);
-    
+
     // Get the raw blob data first to verify it's not empty
     const blobBuffer = await blob.arrayBuffer();
     console.log(`[Decompress] Blob buffer size: ${blobBuffer.byteLength} bytes`);
-    
+
     if (blobBuffer.byteLength === 0) {
       console.error(`[Decompress] ERROR: Received empty blob! Cannot decompress.`);
       return blob;
     }
-    
+
     try {
       console.log(`[Decompress] Creating DecompressionStream with format: ${format}`);
       const ds = new DecompressionStream(format);
       const decompressedStream = blob.stream().pipeThrough(ds);
       const decompressedBlob = await new Response(decompressedStream).blob();
-      
+
       console.log(`[Decompress] SUCCESS! Decompressed size: ${decompressedBlob.size} bytes`);
-      
+
       if (decompressedBlob.size === 0) {
         console.error(`[Decompress] ERROR: Decompression produced empty blob!`);
         return blob;
       }
-      
+
       return decompressedBlob;
     } catch (decompressError) {
       console.error(`[Decompress] DecompressionStream FAILED:`, decompressError);
@@ -132,7 +132,7 @@ export const TransferRoom = () => {
   const [searchResult, setSearchResult] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [verifiedUser, setVerifiedUser] = useState<{ name: string, status: string } | null>(null);
-  
+
   // Stores request info: { from: 'Alice', key: JsonWebKey, id: 'socket_id_123' }
   const [incomingRequest, setIncomingRequest] = useState<{ from: string, key: JsonWebKey, id: string } | null>(null);
 
@@ -164,7 +164,7 @@ export const TransferRoom = () => {
   // =========================================
   const createPeerConnection = useCallback((targetId: string, isInitiator: boolean) => {
     console.log(`[createPeerConnection] Creating ${isInitiator ? 'INITIATOR' : 'NON-INITIATOR'} connection to ${targetId}`);
-    
+
     if (peersRef.current.has(targetId)) {
       console.log(`[createPeerConnection] Connection already exists for ${targetId}`);
       return peersRef.current.get(targetId)!;
@@ -215,6 +215,20 @@ export const TransferRoom = () => {
     socket.on('connect', () => { setStatus('Online'); socket.emit('register-user', username); });
     socket.on('disconnect', () => { setStatus('Offline'); setEncryptionReady(false); });
 
+    // NEW: Handle room-exists check response
+    socket.on('room-exists', ({ roomId, exists }) => {
+      if (exists) {
+        console.log(`[Room] Room ${roomId} exists. Joining...`);
+        socket.emit('join-room', roomId, username);
+        setRoomId(roomId);
+        setRoomMode('join');
+        setIsJoined(true);
+        addLog(`Joined Private Mesh Room: ${roomId}`);
+      } else {
+        alert("Room not found! Please check the ID.");
+      }
+    });
+
     socket.on('user-status', (data: any) => {
       setIsSearching(false);
       if (data.status === 'online') {
@@ -245,10 +259,10 @@ export const TransferRoom = () => {
 
       // ✅ CAPTURE SENDER ID HERE
       if (payload.type === 'conn-request') {
-        setIncomingRequest({ 
-            from: payload.username || sender, 
-            key: payload.key,
-            id: sender // Store the Socket ID to reply later
+        setIncomingRequest({
+          from: payload.username || sender,
+          key: payload.key,
+          id: sender // Store the Socket ID to reply later
         });
       }
 
@@ -302,6 +316,7 @@ export const TransferRoom = () => {
       socket.off('user-joined');
       socket.off('existing-users');
       socket.off('user-left');
+      socket.off('room-exists'); // Clean up listener
       socket.off('user-status');
       socket.off('connect');
       socket.off('disconnect');
@@ -340,12 +355,31 @@ export const TransferRoom = () => {
     const idToJoin = joinRoomInput.trim().toLowerCase();
     if (!idToJoin) return alert("Please enter a Room ID");
     if (idToJoin.length !== 6) return alert("Room ID must be exactly 6 characters");
-    console.log(`[Room] Attempting to join room: ${idToJoin} as user: ${username}`);
-    socket.emit('join-room', idToJoin, username);
-    setRoomId(idToJoin);
-    setRoomMode('join');
-    setIsJoined(true);
-    addLog(`Joined Private Mesh Room: ${idToJoin}`);
+
+    // VALIDATION: Check if room exists before joining
+    console.log(`[Room] Checking existence of room: ${idToJoin}`);
+    socket.emit('check-room', idToJoin);
+  };
+
+  const handleLeaveRoom = () => {
+    if (!isJoined) return;
+
+    console.log(`[Room] Leaving room ${roomId}`);
+    socket.emit('leave-room', roomId);
+
+    // Close all connections
+    peersRef.current.forEach(p => p.close());
+    peersRef.current.clear();
+    keysRef.current.clear();
+    setPeers([]);
+
+    // Reset State
+    setIsJoined(false);
+    setRoomId('');
+    setRoomMode('select');
+    setReceivedFiles([]);
+    setLogs(prev => [...prev, `${new Date().toLocaleTimeString()} - Left the room.`]);
+    setEncryptionReady(false);
   };
 
   const handleDirectConnect = (targetUsername: string) => {
@@ -361,36 +395,36 @@ export const TransferRoom = () => {
     if (!incomingRequest || !keyPairRef.current) return;
 
     try {
-        const { id: senderId, key: foreignKeyJson, from } = incomingRequest;
-        addLog(`🔐 Establishing secure tunnel with ${from}...`);
+      const { id: senderId, key: foreignKeyJson, from } = incomingRequest;
+      addLog(`🔐 Establishing secure tunnel with ${from}...`);
 
-        // 1. Import their key
-        const foreignKey = await importPublicKey(foreignKeyJson);
-        
-        // 2. Derive shared secret
-        const sharedKey = await deriveSharedKey(keyPairRef.current.privateKey, foreignKey);
-        
-        // 3. Save key mapped to their Socket ID
-        keysRef.current.set(senderId, sharedKey);
-        
-        // 4. Send OUR public key back
-        const myPublicKey = await exportPublicKey(keyPairRef.current.publicKey);
-        socket.emit('signal', { 
-            target: senderId, 
-            payload: { type: 'pub-key', key: myPublicKey, username } 
-        });
+      // 1. Import their key
+      const foreignKey = await importPublicKey(foreignKeyJson);
 
-        // 5. Update UI
-        setEncryptionReady(true);
-        setPeers(prev => {
-            if (prev.find(p => p.id === senderId)) return prev.map(p => p.id === senderId ? {...p, status: 'connected'} : p);
-            return [...prev, { id: senderId, username: from, status: 'connected' }];
-        });
+      // 2. Derive shared secret
+      const sharedKey = await deriveSharedKey(keyPairRef.current.privateKey, foreignKey);
 
-        addLog(`✅ Secure Connection Established`);
+      // 3. Save key mapped to their Socket ID
+      keysRef.current.set(senderId, sharedKey);
+
+      // 4. Send OUR public key back
+      const myPublicKey = await exportPublicKey(keyPairRef.current.publicKey);
+      socket.emit('signal', {
+        target: senderId,
+        payload: { type: 'pub-key', key: myPublicKey, username }
+      });
+
+      // 5. Update UI
+      setEncryptionReady(true);
+      setPeers(prev => {
+        if (prev.find(p => p.id === senderId)) return prev.map(p => p.id === senderId ? { ...p, status: 'connected' } : p);
+        return [...prev, { id: senderId, username: from, status: 'connected' }];
+      });
+
+      addLog(`✅ Secure Connection Established`);
     } catch (e) {
-        console.error("Handshake failed", e);
-        addLog("❌ Handshake Failed");
+      console.error("Handshake failed", e);
+      addLog("❌ Handshake Failed");
     }
 
     setIncomingRequest(null);
@@ -412,8 +446,8 @@ export const TransferRoom = () => {
       if (text.trim().startsWith('{')) {
         const msg = JSON.parse(text);
 
-        if (msg.type === 'file-start') {          
-          console.log(`[Receiver] Received file-start metadata:`, msg);          
+        if (msg.type === 'file-start') {
+          console.log(`[Receiver] Received file-start metadata:`, msg);
           setIsTransferring(true);
           setCurrentFileName(msg.name);
           setTransferStage('transferred');
@@ -462,7 +496,7 @@ export const TransferRoom = () => {
                 // 5. MIME-TYPE ENFORCEMENT - Set correct MIME type based on file extension
                 const lowerName = msg.name.toLowerCase();
                 let finalMime = 'application/octet-stream';
-                
+
                 if (lowerName.endsWith('.pdf')) {
                   finalMime = 'application/pdf';
                   console.log(`[Receiver] Detected PDF file - MIME type: ${finalMime}`);
@@ -486,8 +520,8 @@ export const TransferRoom = () => {
                 // 6. Extension Cleanup - Remove compression extensions
                 const finalName = msg.name.replace(/\.gz$/, "").replace(/\.br$/, "").replace(/\.deflate$/, "");
                 const url = URL.createObjectURL(correctedBlob);
-                
-                setReceivedFiles(prev => [...prev, { name: finalName, url }]);
+
+                setReceivedFiles(prev => [{ name: finalName, url }, ...prev]);
                 setTransferStage('complete');
                 console.log(`[Receiver] File ready for download: ${finalName}`);
 
@@ -508,7 +542,7 @@ export const TransferRoom = () => {
                 setProgress(100);
                 setIsTransferring(false);
                 setQueueStatus('');
-                
+
                 // 8. Send acknowledgment
                 const ackMsg = JSON.stringify({ type: 'file-ack', name: msg.name });
                 const ackBuffer = new TextEncoder().encode(ackMsg);
@@ -564,7 +598,7 @@ export const TransferRoom = () => {
         // Do NOT override with analyzeFile recommendation, as that could cause mismatch between
         // what was actually compressed vs what we tell the receiver to decompress with
         const algoName = meta.algorithm;
-        
+
         console.log(`[Sender] File: ${originalFile.name}`);
         console.log(`[Sender] Meta algorithm from processFile: ${meta.algorithm}`);
         console.log(`[Sender] Final algorithm to use: ${algoName}`);
@@ -612,7 +646,7 @@ export const TransferRoom = () => {
           const stats = getCompressionStats(meta.originalSize, meta.compressedSize);
           setTransferStats({
             originalSize: stats.originalSize,
-            finalSize: stats.compressedSize, 
+            finalSize: stats.compressedSize,
             speed: transferResult.speed,
             compressionPercent: stats.compressionPercent,
             compressionRatio: stats.compressionRatio
@@ -699,20 +733,20 @@ export const TransferRoom = () => {
                 <h2 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-6 flex items-center gap-3">
                   <Users className="w-5 h-5 text-blue-400" /> Mesh Room Initialization
                 </h2>
-                
+
                 {roomMode === 'select' ? (
                   // Show Create/Join buttons
                   <div className="space-y-4">
                     <div className="grid grid-cols-2 gap-4">
-                      <button 
+                      <button
                         onClick={handleCreateRoom}
                         className="bg-gradient-to-br from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white font-bold py-4 px-6 rounded-2xl transition-all shadow-xl shadow-blue-600/30 flex flex-col items-center justify-center gap-2 group"
                       >
                         <Zap className="w-5 h-5 group-hover:scale-110 transition-transform" />
                         <span className="text-sm">Create Room</span>
                       </button>
-                      
-                      <button 
+
+                      <button
                         onClick={() => setRoomMode('join')}
                         className="bg-gradient-to-br from-purple-600 to-purple-700 hover:from-purple-500 hover:to-purple-600 text-white font-bold py-4 px-6 rounded-2xl transition-all shadow-xl shadow-purple-600/30 flex flex-col items-center justify-center gap-2 group"
                       >
@@ -734,14 +768,14 @@ export const TransferRoom = () => {
                         className="flex-1 bg-black border border-gray-700 focus:border-purple-500 rounded-2xl px-5 py-3 text-white outline-none placeholder:text-gray-600 font-medium uppercase tracking-wider transition-all"
                         maxLength={6}
                       />
-                      <button 
+                      <button
                         onClick={handleJoinRoom}
                         className="bg-purple-600 hover:bg-purple-500 text-white font-bold px-8 py-3 rounded-xl transition-all shadow-xl shadow-purple-600/20 flex items-center gap-2"
                       >
                         <Play className="w-4 h-4 fill-current" /> JOIN
                       </button>
                     </div>
-                    <button 
+                    <button
                       onClick={() => {
                         setRoomMode('select');
                         setJoinRoomInput('');
@@ -765,6 +799,15 @@ export const TransferRoom = () => {
                     <p className="text-xs font-bold text-blue-400 uppercase tracking-widest">{peers.length} Nodes Connected</p>
                   </div>
                 </div>
+                {/* NEW: Leave Room Button */}
+                {isJoined && (
+                  <button
+                    onClick={handleLeaveRoom}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-xl border border-red-500/20 transition-all text-xs font-bold uppercase tracking-wider"
+                  >
+                    <LogOut className="w-4 h-4" /> Leave Room
+                  </button>
+                )}
                 <div className="flex -space-x-3 hover:space-x-1 transition-all duration-500">
                   {peers.map((p, i) => (
                     <motion.div
@@ -992,7 +1035,7 @@ export const TransferRoom = () => {
                 >
                   Reject
                 </button>
-                
+
                 {/* ✅ CONNECTED TO THE HANDSHAKE LOGIC */}
                 <button
                   onClick={acceptRequest}
@@ -1009,7 +1052,7 @@ export const TransferRoom = () => {
       {/* PROGRESS TRACKER - Bottom Position */}
       {isTransferring && transferStage !== 'idle' && (
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-gray-900/90 border border-gray-700/50 p-5 rounded-2xl backdrop-blur z-50 max-w-[85vw]">
-          <TransferProgressStages 
+          <TransferProgressStages
             currentStage={transferStage}
             isReceiver={receiverPipelineRef.current !== null}
             fileName={currentFileName}
