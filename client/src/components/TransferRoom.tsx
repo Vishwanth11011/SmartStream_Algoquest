@@ -364,21 +364,6 @@ export const TransferRoom = () => {
     };
   }, [username, navigate, createPeerConnection]);
 
-  // =========================================
-  // 3. SEARCH & USER DISCOVERY
-  // =========================================
-  useEffect(() => {
-    const delayDebounceFn = setTimeout(() => {
-      if (searchQuery.length > 2 && searchQuery !== username) {
-        setIsSearching(true);
-        socket.emit('check-user', searchQuery);
-      } else {
-        setSearchResult(null); setVerifiedUser(null); setIsSearching(false);
-      }
-    }, 500);
-    return () => clearTimeout(delayDebounceFn);
-  }, [searchQuery, username]);
-
   // --- SYNC: KEEP ROOM STATE FRESH ---
   useEffect(() => {
     if (!isJoined || !roomId) return;
@@ -780,7 +765,7 @@ export const TransferRoom = () => {
           </div>
           <div className="flex flex-col">
             <span className="font-bold text-xl tracking-tight text-white leading-tight">SmartStream</span>
-            <span className="text-blue-500 text-[10px] font-bold tracking-[0.2em] uppercase">Multi-Mesh Pro</span>
+            {/* <span className="text-blue-500 text-[10px] font-bold tracking-[0.2em] uppercase">Multi-Mesh Pro</span> */}
           </div>
         </div>
         <div className="flex items-center gap-6">
