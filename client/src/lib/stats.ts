@@ -34,7 +34,8 @@ export const calculateCompressionPercent = (originalSize: number, compressedSize
  */
 export const calculateCompressionRatio = (originalSize: number, compressedSize: number): number => {
   if (compressedSize === 0) return 0;
-  return parseFloat((originalSize / compressedSize).toFixed(2));
+  const ratio = parseFloat((originalSize / compressedSize).toFixed(2));
+  return ratio < 0 ? 0 : ratio;
 };
 
 /**

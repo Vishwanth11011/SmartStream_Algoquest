@@ -211,16 +211,38 @@ io.on('connection', (socket) => {
     io.to(target).emit('signal', { sender: socket.id, payload });
   });
 
-  // D. User Check (Search Filter - Backward Compatibility)
+  // D. User Check (Search Filter - Smart Status)
   socket.on('check-user', (targetUsername: string) => {
     if (!targetUsername) return;
     const cleanTarget = targetUsername.trim().toLowerCase();
-    const isOnline = usernameToSocket.has(cleanTarget);
+    const targetSocketId = usernameToSocket.get(cleanTarget);
+
+    let status = 'offline';
+
+    if (targetSocketId) {
+      // Check if user is in a room
+      const targetSocket = io.sockets.sockets.get(targetSocketId);
+      if (targetSocket) {
+        status = targetSocket.data.roomId ? 'busy' : 'idle';
+      }
+    }
 
     socket.emit('user-status', {
       username: targetUsername,
-      status: isOnline ? 'online' : 'offline'
+      status // 'offline' | 'idle' | 'busy'
     });
+  });
+
+  // NEW: Invite User Logic
+  socket.on('invite-user', ({ targetUsername, roomId }) => {
+    const targetSocketId = usernameToSocket.get(targetUsername.toLowerCase());
+    if (targetSocketId) {
+      console.log(`[Server] Invitation: ${socket.data.username} invited ${targetUsername} to ${roomId}`);
+      io.to(targetSocketId).emit('invite-received', {
+        from: socket.data.username,
+        roomId
+      });
+    }
   });
 
   // F. Room Existence Check
@@ -233,6 +255,7 @@ io.on('connection', (socket) => {
   socket.on('leave-room', (roomId: string) => {
     console.log(`[Server] User ${socket.id} is leaving room ${roomId}`);
     socket.leave(roomId);
+    socket.data.roomId = null; // ✅ Mark as idle
 
     // Explicitly clean up roomUsers
     if (roomUsers[roomId]) {
@@ -245,6 +268,13 @@ io.on('connection', (socket) => {
       if (roomUsers[roomId].length === 0) {
         delete roomUsers[roomId];
       }
+    }
+  });
+
+  // H. Sync Room Users (Periodic Refresh)
+  socket.on('sync-room-users', (roomId: string) => {
+    if (roomUsers[roomId]) {
+      socket.emit('room-users-sync', roomUsers[roomId]);
     }
   });
 

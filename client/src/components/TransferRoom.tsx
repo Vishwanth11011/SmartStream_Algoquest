@@ -10,7 +10,7 @@ import { getCompressionStats } from '../lib/stats';
 import { FilePicker } from './FilePicker';
 import { TransferProgressStages, type TransferStage } from './TransferProgressStages';
 import {
-  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Zap, Terminal, Signal, Loader2, Users, Play, LogOut, ShieldAlert, Search, UserX, ChevronDown, ShieldCheck, Globe, Info
+  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Zap, Terminal, Signal, Loader2, Users, LogOut, ShieldAlert, Search, UserX, ChevronDown, ShieldCheck, Globe, Info, XCircle, CheckCircle
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -75,7 +75,17 @@ const decompressBlob = async (blob: Blob, algo: string, fileName: string): Promi
     try {
       console.log(`[Decompress] Creating DecompressionStream with format: ${format}`);
       const ds = new DecompressionStream(format);
-      const decompressedStream = blob.stream().pipeThrough(ds);
+      
+      // Recreate blob with correct MIME type for the compression format
+      let mimeType = 'application/octet-stream';
+      if (format === 'gzip') {
+        mimeType = 'application/gzip';
+      } else if (format === 'deflate') {
+        mimeType = 'application/x-deflate';
+      }
+      const typedBlob = new Blob([blobBuffer], { type: mimeType });
+      
+      const decompressedStream = typedBlob.stream().pipeThrough(ds);
       const decompressedBlob = await new Response(decompressedStream).blob();
 
       console.log(`[Decompress] SUCCESS! Decompressed size: ${decompressedBlob.size} bytes`);
@@ -143,13 +153,14 @@ export const TransferRoom = () => {
   const keyPairRef = useRef<CryptoKeyPair | null>(null);
   const receiverPipelineRef = useRef<ReceiverPipeline | null>(null);
   const lastAckRef = useRef<string>('');
+  const transferSpeedRef = useRef<string>('N/A');
 
   // --- UI & PIPELINE MONITORING ---
   const [isTransferring, setIsTransferring] = useState(false);
   const [, setEncryptionReady] = useState(false);
   const [, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
-  const [receivedFiles, setReceivedFiles] = useState<{ name: string, url: string }[]>([]);
+  const [receivedFiles, setReceivedFiles] = useState<{ name: string, url: string, timestamp: number }[]>([]);
   const [transferStats, setTransferStats] = useState<any>(null);
   const [queueStatus, setQueueStatus] = useState('');
   const [advancedStats, setAdvancedStats] = useState<any>(null);
@@ -158,6 +169,37 @@ export const TransferRoom = () => {
 
   // Terminal Logger
   const addLog = (msg: string) => setLogs(prev => [...prev.slice(-19), `${new Date().toLocaleTimeString()} - ${msg}`]);
+
+  // --- TOAST NOTIFICATIONS ---
+  const [toasts, setToasts] = useState<{ id: string, type: 'success' | 'error' | 'info', message: string }[]>([]);
+  const addToast = (type: 'success' | 'error' | 'info', message: string) => {
+    const id = Math.random().toString(36).substring(7);
+    setToasts(prev => [...prev, { id, type, message }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+  };
+
+  // --- BACK BUTTON PROTECTION ---
+  // Active on Mount: Protects against accidental back navigation even if not yet in a room
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      event.preventDefault();
+      // Push state back to prevent navigation
+      window.history.pushState(null, '', window.location.pathname);
+
+      const confirmLogout = window.confirm("Are you sure you want to log out? This will disconnect you from the mesh.");
+      if (confirmLogout) {
+        handleLogout();
+      }
+    };
+
+    // Push initial state
+    window.history.pushState(null, '', window.location.pathname);
+    window.addEventListener('popstate', handlePopState);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
 
   // =========================================
   // 1. CONNECTION FACTORY (WebRTC HANDSHAKE)
@@ -237,6 +279,15 @@ export const TransferRoom = () => {
       } else {
         alert("Room not found! Please check the ID.");
       }
+    });
+
+    // NEW: Handle Room Users Sync (Remove stale users)
+    socket.on('room-users-sync', (users: { id: string, username: string }[]) => {
+      setPeers(prev => {
+        const validIds = new Set(users.map(u => u.id));
+        // Only keep peers that are in the server's list
+        return prev.filter(p => validIds.has(p.id));
+      });
     });
 
     socket.on('user-status', (data: any) => {
@@ -326,8 +377,12 @@ export const TransferRoom = () => {
       peersRef.current.get(id)?.close();
       peersRef.current.delete(id);
       keysRef.current.delete(id);
-      setPeers(prev => prev.filter(p => p.id !== id));
       if (peersRef.current.size === 0) setEncryptionReady(false);
+      
+      // Remove user icon after 1 second delay
+      setTimeout(() => {
+        setPeers(prev => prev.filter(p => p.id !== id));
+      }, 1000);
     });
 
     return () => {
@@ -335,27 +390,61 @@ export const TransferRoom = () => {
       socket.off('user-joined');
       socket.off('existing-users');
       socket.off('user-left');
-      socket.off('room-exists'); // Clean up listener
+      socket.off('room-exists');
+      socket.off('room-users-sync'); // Clean up
       socket.off('user-status');
       socket.off('connect');
       socket.off('disconnect');
     };
   }, [username, navigate, createPeerConnection]);
 
-  // =========================================
-  // 3. SEARCH & USER DISCOVERY
-  // =========================================
+  // --- SYNC: KEEP ROOM STATE FRESH ---
   useEffect(() => {
-    const delayDebounceFn = setTimeout(() => {
-      if (searchQuery.length > 2 && searchQuery !== username) {
-        setIsSearching(true);
-        socket.emit('check-user', searchQuery);
-      } else {
-        setSearchResult(null); setVerifiedUser(null); setIsSearching(false);
+    if (!isJoined || !roomId) return;
+    const interval = setInterval(() => {
+      socket.emit('sync-room-users', roomId);
+    }, 5000); // 5 seconds
+    return () => clearInterval(interval);
+  }, [isJoined, roomId]);
+
+  // --- HIGH-SPEED TURBO LAYER ---
+  useEffect(() => {
+    const peerCount = peers.length;
+    if (peerCount === 1) {
+      const manager = peersRef.current.values().next().value;
+      if (manager && typeof manager.enableTurboMode === 'function') {
+        manager.enableTurboMode();
       }
-    }, 500);
-    return () => clearTimeout(delayDebounceFn);
-  }, [searchQuery, username]);
+    } else {
+      peersRef.current.forEach(manager => {
+        if (typeof manager.disableTurboMode === 'function') {
+          manager.disableTurboMode();
+        }
+      });
+    }
+  }, [peers]);
+
+  // --- ACTIVITY CHECK: Every 5 seconds, verify all users are active ---
+  useEffect(() => {
+    const activityCheckInterval = setInterval(() => {
+      setPeers(prev => {
+        const activePeers = prev.filter(peer => {
+          const manager = peersRef.current.get(peer.id);
+          // Check if peer connection is still alive
+          if (!manager || !manager.dataChannel || manager.dataChannel.readyState !== 'open') {
+            console.log(`[ActivityCheck] Removing inactive peer: ${peer.id}`);
+            peersRef.current.delete(peer.id);
+            keysRef.current.delete(peer.id);
+            return false;
+          }
+          return true;
+        });
+        return activePeers;
+      });
+    }, 5000);
+
+    return () => clearInterval(activityCheckInterval);
+  }, []);
 
   // =========================================
   // 4. USER INTERACTION HANDLERS
@@ -540,7 +629,16 @@ export const TransferRoom = () => {
                 const finalName = msg.name.replace(/\.gz$/, "").replace(/\.br$/, "").replace(/\.deflate$/, "");
                 const url = URL.createObjectURL(correctedBlob);
 
-                setReceivedFiles(prev => [{ name: finalName, url }, ...prev]);
+                // NEW: Add timestamp and revoke old URLs to prevent memory leaks
+                setReceivedFiles(prev => {
+                  // Revoke old URL if we're replacing a file with the same name
+                  const oldFile = prev.find(f => f.name === finalName);
+                  if (oldFile) {
+                    URL.revokeObjectURL(oldFile.url);
+                    console.log(`[Receiver] Revoked old URL for: ${oldFile.name}`);
+                  }
+                  return [{ name: finalName, url, timestamp: Date.now() }, ...prev];
+                });
                 setTransferStage('complete');
                 console.log(`[Receiver] File ready for download: ${finalName}`);
 
@@ -611,6 +709,18 @@ export const TransferRoom = () => {
     setIsTransferring(true);
     const encoder = new TextEncoder();
 
+    // DYNAMIC BUFFER ALLOCATION (SAFE MODE + TURBO SUPPORT)
+    // Base 1MB Limit per channel. Total 4MB in Turbo Mode (4 channels). safe.
+    const bufferLimit = 1024 * 1024;
+    const bufferThreshold = 64 * 1024;
+
+    peersRef.current.forEach(manager => {
+      // @ts-ignore - method added in webrtc.ts
+      if (typeof manager.setBufferParams === 'function') {
+        manager.setBufferParams(bufferLimit, bufferThreshold);
+      }
+    });
+
     try {
       for (let i = 0; i < files.length; i++) {
         const originalFile = files[i];
@@ -637,7 +747,7 @@ export const TransferRoom = () => {
 
         // 3. Security Block
         if (meta.securityStatus === 'Suspicious') {
-          alert(`🚫 SECURITY BLOCK TRIGGERED\nFile: ${originalFile.name}\nRisk Score: ${meta.riskScore}%\nReason: ${meta.reason}`);
+          addToast('error', `🚫 Blocked: ${originalFile.name} (Risk: ${meta.riskScore}%)`);
           addLog(`🚫 Blocked potentially harmful file: ${originalFile.name}`);
           continue;
         }
@@ -783,7 +893,7 @@ export const TransferRoom = () => {
           peerCount++;
         }
 
-        addLog(`✅ Mesh Broadcast Complete: "${originalFile.name}"`);
+        addLog(`✅ Mesh Broadcast Complete: "${originalFile.name}" sent to ${activePeers.length} peer(s)`);
         setProgress(100);
       }
       setQueueStatus('');
@@ -811,7 +921,7 @@ export const TransferRoom = () => {
           </div>
           <div className="flex flex-col">
             <span className="font-bold text-xl tracking-tight text-white leading-tight">SmartStream</span>
-            <span className="text-blue-500 text-[10px] font-bold tracking-[0.2em] uppercase">Multi-Mesh Pro</span>
+            {/* <span className="text-blue-500 text-[10px] font-bold tracking-[0.2em] uppercase">Multi-Mesh Pro</span> */}
           </div>
         </div>
         <div className="flex items-center gap-6">
@@ -836,54 +946,60 @@ export const TransferRoom = () => {
         {/* LEFT COLUMN: PRIMARY CONTROLS */}
         <div className="lg:col-span-8 space-y-6">
 
-          {/* MESH DISCOVERY PANEL */}
-          <div className="bg-[#121826] border border-gray-800 rounded-3xl p-8 shadow-2xl relative z-30 overflow-hidden">
-            <div className="absolute top-0 right-0 p-4 opacity-10"><Zap className="w-32 h-32 text-blue-500" /></div>
+          {/* MESH DISCOVERY PANEL - 3D STYLE */}
+          <div className="bg-gradient-to-b from-[#1a1f2e] to-[#121826] border border-black/50 rounded-[2rem] p-8 shadow-[0_20px_50px_-12px_rgba(0,0,0,0.7)] relative z-30 overflow-hidden group hover:shadow-[0_30px_60px_-12px_rgba(0,0,0,0.8)] transition-all duration-500">
+            {/* Inner Top Highlight for 3D effect */}
+            <div className="absolute inset-x-0 top-0 h-px bg-white/10" />
+
+            <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity duration-500 transform group-hover:scale-110"><Zap className="w-40 h-40 text-blue-500 blur-sm" /></div>
+
             {!isJoined ? (
               <div className="relative z-10">
-                <h2 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-6 flex items-center gap-3">
-                  <Users className="w-5 h-5 text-blue-400" /> Mesh Room Initialization
+                <h2 className="text-sm font-black text-gray-400 uppercase tracking-[0.2em] mb-8 flex items-center gap-3 border-b border-gray-800 pb-4">
+                  <Users className="w-5 h-5 text-blue-500" /> Mesh Room Initialization
                 </h2>
 
                 {roomMode === 'select' ? (
                   // Show Create/Join buttons
-                  <div className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-6">
+                    <div className="grid grid-cols-2 gap-6">
                       <button
                         onClick={handleCreateRoom}
-                        className="bg-gradient-to-br from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white font-bold py-4 px-6 rounded-2xl transition-all shadow-xl shadow-blue-600/30 flex flex-col items-center justify-center gap-2 group"
+                        className="bg-[#1A202C] hover:bg-[#232936] text-white font-bold py-6 px-6 rounded-2xl transition-all shadow-lg border border-gray-700/50 hover:border-blue-500/50 flex flex-col items-center justify-center gap-3 group relative overflow-hidden"
                       >
-                        <Zap className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                        <span className="text-sm">Create Room</span>
+                        <div className="absolute inset-0 bg-blue-500/5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                        <div className="p-3 rounded-full bg-blue-500/10 text-blue-400 group-hover:scale-110 transition-transform"><Zap className="w-6 h-6" /></div>
+                        <span className="text-sm font-black tracking-wide">CREATE MESH</span>
                       </button>
 
                       <button
                         onClick={() => setRoomMode('join')}
-                        className="bg-gradient-to-br from-purple-600 to-purple-700 hover:from-purple-500 hover:to-purple-600 text-white font-bold py-4 px-6 rounded-2xl transition-all shadow-xl shadow-purple-600/30 flex flex-col items-center justify-center gap-2 group"
+                        className="bg-[#1A202C] hover:bg-[#232936] text-white font-bold py-6 px-6 rounded-2xl transition-all shadow-lg border border-gray-700/50 hover:border-purple-500/50 flex flex-col items-center justify-center gap-3 group relative overflow-hidden"
                       >
-                        <Users className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                        <span className="text-sm">Join Room</span>
+                        <div className="absolute inset-0 bg-purple-500/5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                        <div className="p-3 rounded-full bg-purple-500/10 text-purple-400 group-hover:scale-110 transition-transform"><Users className="w-6 h-6" /></div>
+                        <span className="text-sm font-black tracking-wide">JOIN MESH</span>
                       </button>
                     </div>
-                    <p className="text-xs text-gray-500 text-center flex items-center justify-center gap-2"><Info className="w-3 h-3" /> Each room gets a unique 6-character ID.</p>
+                    <p className="text-[10px] text-gray-500 text-center flex items-center justify-center gap-2 font-mono uppercase tracking-widest"><Info className="w-3 h-3" /> Secure P2P Enclave Generation</p>
                   </div>
                 ) : roomMode === 'join' ? (
                   // Show join input field
-                  <div className="space-y-4">
-                    <div className="flex gap-3">
+                  <div className="space-y-6">
+                    <div className="flex gap-4">
                       <input
                         value={joinRoomInput}
                         onChange={e => setJoinRoomInput(e.target.value.toUpperCase())}
                         onKeyPress={(e) => e.key === 'Enter' && handleJoinRoom()}
-                        placeholder="Enter 6-character Room ID (e.g. 'a1b2c3')"
-                        className="flex-1 bg-black border border-gray-700 focus:border-purple-500 rounded-2xl px-5 py-3 text-white outline-none placeholder:text-gray-600 font-medium uppercase tracking-wider transition-all"
+                        placeholder="ROOM ID"
+                        className="flex-1 bg-black/50 border border-gray-700 focus:border-purple-500 rounded-2xl px-6 py-4 text-white outline-none placeholder:text-gray-700 font-black text-xl uppercase tracking-[0.2em] transition-all shadow-inner"
                         maxLength={6}
                       />
                       <button
                         onClick={handleJoinRoom}
-                        className="bg-purple-600 hover:bg-purple-500 text-white font-bold px-8 py-3 rounded-xl transition-all shadow-xl shadow-purple-600/20 flex items-center gap-2"
+                        className="bg-purple-600 hover:bg-purple-500 text-white font-black px-8 py-3 rounded-2xl transition-all shadow-lg shadow-purple-900/40 flex items-center gap-2 active:translate-y-1"
                       >
-                        <Play className="w-4 h-4 fill-current" /> JOIN
+                        ENTER
                       </button>
                     </div>
                     <button
@@ -891,47 +1007,48 @@ export const TransferRoom = () => {
                         setRoomMode('select');
                         setJoinRoomInput('');
                       }}
-                      className="w-full text-xs font-bold text-gray-400 hover:text-gray-300 py-2 transition-colors"
+                      className="w-full text-xs font-bold text-gray-500 hover:text-gray-300 py-2 transition-colors uppercase tracking-widest"
                     >
-                      ← Back
+                      ← Abort Connection
                     </button>
-                    <p className="text-xs text-gray-500 text-center"><Info className="w-3 h-3 inline mr-1" /> Enter the room ID shared by the creator.</p>
                   </div>
                 ) : null}
               </div>
             ) : (
               <div className="relative z-10 flex items-center justify-between">
-                <div className="space-y-1">
-                  <h2 className="text-2xl font-black text-white flex items-center gap-3 italic tracking-tight uppercase">
-                    <Globe className="text-blue-500 animate-pulse" /> {roomId}
+                <div className="space-y-2">
+                  <h2 className="text-3xl font-black text-white flex items-center gap-4 tracking-tighter uppercase relative">
+                    <span className="text-gray-700 select-none">#</span> {roomId}
+                    <div className="absolute -top-3 -right-3 w-2 h-2 rounded-full bg-green-500 shadow-[0_0_10px_#22c55e]" />
                   </h2>
                   <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                    <p className="text-xs font-bold text-blue-400 uppercase tracking-widest">{peers.length} Nodes Connected</p>
+                    <span className="px-2 py-0.5 rounded bg-blue-500/10 border border-blue-500/20 text-[10px] font-bold text-blue-400 uppercase tracking-widest">
+                      {peers.length} Nodes Active
+                    </span>
                   </div>
                 </div>
                 {/* NEW: Leave Room Button */}
                 {isJoined && (
                   <button
                     onClick={handleLeaveRoom}
-                    className="flex items-center gap-2 px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-xl border border-red-500/20 transition-all text-xs font-bold uppercase tracking-wider"
+                    className="flex items-center gap-2 px-5 py-3 bg-red-500/5 hover:bg-red-500/10 text-red-500/80 hover:text-red-400 rounded-xl border border-red-500/10 transition-all text-[10px] font-black uppercase tracking-widest"
                   >
-                    <LogOut className="w-4 h-4" /> Leave Room
+                    <LogOut className="w-3 h-3" /> Disconnect
                   </button>
                 )}
-                <div className="flex -space-x-3 hover:space-x-1 transition-all duration-500">
+                <div className="flex -space-x-4 hover:space-x-1 transition-all duration-500 pl-4">
                   {peers.map((p, i) => (
                     <motion.div
                       key={i}
                       initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }}
                       title={`${p.username} (${p.status})`}
-                      className={clsx("w-12 h-12 rounded-2xl border-4 border-[#121826] flex items-center justify-center text-sm font-black text-white shadow-xl transition-transform hover:scale-110 cursor-pointer",
-                        p.status === 'connected' ? "bg-gradient-to-br from-green-500 to-emerald-700" : "bg-gradient-to-br from-yellow-500 to-orange-700")}
+                      className={clsx("w-14 h-14 rounded-2xl border-4 border-[#121826] flex items-center justify-center text-lg font-black text-white shadow-2xl transition-transform hover:scale-110 cursor-pointer relative z-10",
+                        p.status === 'connected' ? "bg-gradient-to-br from-green-500 to-emerald-700 shadow-green-900/20" : "bg-gradient-to-br from-yellow-500 to-orange-700")}
                     >
-                      {p.username[0].toUpperCase()}
+                      {p.username && p.username.length > 0 ? p.username[0].toUpperCase() : '?'}
                     </motion.div>
                   ))}
-                  {peers.length === 0 && <div className="text-gray-500 text-sm font-bold animate-pulse px-4 border-l border-gray-800">Waiting for peers to join...</div>}
+                  {peers.length === 0 && <div className="text-gray-600 text-[10px] font-bold animate-pulse px-4 border-l border-gray-800 flex items-center h-14 uppercase tracking-widest">Awaiting Nodes...</div>}
                 </div>
               </div>
             )}
@@ -939,13 +1056,14 @@ export const TransferRoom = () => {
 
           {/* DIRECT SEARCH FALLBACK (VISIBLE WHEN NOT IN ROOM) */}
           {!isJoined && (
-            <div className="hidden bg-[#121826] border border-gray-800 rounded-3xl p-6 shadow-xl relative z-20">
+            <div className="hidden bg-gradient-to-b from-[#1a1f2e] to-[#121826] border border-black/50 rounded-[2rem] p-6 shadow-xl relative z-20">
+              <div className="absolute inset-x-0 top-0 h-px bg-white/5" />
               <h2 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-3"><Signal className="w-4 h-4 text-blue-400" /> Direct Handshake</h2>
               <div className="relative group">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5 group-focus-within:text-blue-500 transition-colors" />
                 <input
                   type="text" placeholder="Search unique username for 1-to-1 tunnel..."
-                  className="w-full bg-black border border-gray-700 rounded-2xl py-4 pl-12 pr-4 text-white outline-none focus:border-blue-500/50 transition-all font-medium"
+                  className="w-full bg-black/60 border border-gray-700/50 rounded-2xl py-4 pl-12 pr-4 text-white outline-none focus:border-blue-500/50 transition-all font-medium placeholder:text-gray-700"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value.trim().toLowerCase())}
                 />
@@ -983,7 +1101,7 @@ export const TransferRoom = () => {
             </div> */}
 
             {queueStatus && (
-              <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-4 bg-blue-500/10 border border-blue-500/20 p-4 rounded-2xl flex items-center justify-center gap-4 shadow-xl">
+              <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-4 bg-blue-500/10 border border-blue-500/20 p-4 rounded-2xl flex items-center justify-center gap-4 shadow-xl backdrop-blur-md">
                 <Loader2 className="animate-spin text-blue-400 w-5 h-5" />
                 <span className="text-sm font-black text-blue-400 uppercase tracking-widest">{queueStatus}</span>
               </motion.div>
@@ -1029,7 +1147,10 @@ export const TransferRoom = () => {
                     </div>
                     <div className="space-y-1.5">
                       <span className="text-gray-600 uppercase tracking-wider block font-bold">Compression Percentage</span>
-                      <div className="text-green-400 text-sm font-black italic">{((1 - advancedStats.compressedSize / advancedStats.originalSize) * 100).toFixed(2)}%</div>
+                      <div className="space-y-1.5">
+                        <span className="text-gray-600 uppercase tracking-wider block font-bold">Compression Percentage</span>
+                        <div className="text-green-400 text-sm font-black italic">{Math.max(0, (1 - advancedStats.compressedSize / advancedStats.originalSize) * 100).toFixed(2)}%</div>
+                      </div>
                     </div>
                     <div className="space-y-1.5">
                       <span className="text-gray-600 uppercase tracking-wider block font-bold">Transport Payload</span>
@@ -1082,7 +1203,7 @@ export const TransferRoom = () => {
                   >
                     <div className="flex flex-col overflow-hidden">
                       <span className="text-sm text-gray-200 truncate w-40 font-bold tracking-tight">{f.name}</span>
-                      <span className="text-[9px] text-gray-600 font-mono italic">{new Date().toLocaleTimeString()} • Verified</span>
+                      <span className="text-[9px] text-gray-600 font-mono italic">{new Date(f.timestamp).toLocaleTimeString()} • Verified</span>
                     </div>
                     <a
                       href={f.url} download={f.name}
@@ -1097,8 +1218,8 @@ export const TransferRoom = () => {
           )}
 
           {/* SYSTEM LOGS TERMINAL */}
-          <div className="bg-black border border-gray-800 rounded-[2.5rem] p-1 flex-1 flex flex-col min-h-[450px] shadow-[0_30px_60px_-12px_rgba(0,0,0,0.8)] overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between bg-gray-900/30 rounded-t-[2.4rem]">
+          <div className="bg-black border border-gray-800/80 rounded-[2.5rem] p-1 flex-1 flex flex-col min-h-[450px] shadow-[0_30px_60px_-12px_rgba(0,0,0,0.8)] overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-800/50 flex items-center justify-between bg-gradient-to-r from-gray-900 via-gray-900 to-black rounded-t-[2.4rem]">
               <div className="flex items-center gap-3">
                 <Terminal className="w-4 h-4 text-blue-500" />
                 <span className="text-[10px] font-black text-gray-500 tracking-[0.2em] uppercase">Security Engine Output</span>
@@ -1109,7 +1230,7 @@ export const TransferRoom = () => {
                 <div className="w-2.5 h-2.5 rounded-full bg-green-500/20 animate-pulse" />
               </div>
             </div>
-            <div className="flex-1 p-6 font-mono text-[10px] space-y-2 overflow-y-auto custom-scrollbar text-gray-400 bg-gradient-to-b from-black to-[#05070a]">
+            <div className="flex-1 p-6 font-mono text-[10px] space-y-2 overflow-y-auto custom-scrollbar text-gray-400 bg-[#05070a]">
               {logs.map((l, i) => (
                 <motion.div key={i} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} className="flex gap-3 items-start group">
                   <span className="text-blue-500 font-black opacity-40 group-hover:opacity-100 transition-opacity">»</span>
@@ -1126,6 +1247,34 @@ export const TransferRoom = () => {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* TOAST CONTAINER */}
+      <div className="fixed top-24 right-6 z-[100] flex flex-col gap-4 pointer-events-none">
+        <AnimatePresence>
+          {toasts.map(toast => (
+            <motion.div
+              key={toast.id}
+              initial={{ opacity: 0, x: 50, scale: 0.9 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 20, scale: 0.9 }}
+              className={clsx(
+                "pointer-events-auto flex items-center gap-3 px-5 py-4 rounded-2xl shadow-2xl border backdrop-blur-md min-w-[300px]",
+                toast.type === 'success' ? "bg-green-500/10 border-green-500/20 text-green-400" :
+                  toast.type === 'error' ? "bg-red-500/10 border-red-500/20 text-red-400" :
+                    "bg-blue-500/10 border-blue-500/20 text-blue-400"
+              )}
+            >
+              {toast.type === 'success' ? <CheckCircle className="w-5 h-5 flex-shrink-0" /> :
+                toast.type === 'error' ? <XCircle className="w-5 h-5 flex-shrink-0" /> :
+                  <Info className="w-5 h-5 flex-shrink-0" />}
+              <div>
+                <h4 className="font-bold text-sm uppercase tracking-wide">{toast.type}</h4>
+                <p className="text-xs font-medium opacity-90">{toast.message}</p>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
       </div>
 
       {/* MODAL: INCOMING ENCRYPTED REQUEST */}
@@ -1154,8 +1303,6 @@ export const TransferRoom = () => {
                 >
                   Reject
                 </button>
-
-                {/* ✅ CONNECTED TO THE HANDSHAKE LOGIC */}
                 <button
                   onClick={acceptRequest}
                   className="flex-1 py-4 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white font-black text-xs uppercase tracking-widest shadow-xl shadow-blue-600/30 transition-all active:scale-95"
@@ -1178,18 +1325,22 @@ export const TransferRoom = () => {
           />
         </motion.div>
       )}
+
     </div>
   );
 };
 
-// --- SUBSIDIARY COMPONENT: PERFORMANCE CARD ---
+// --- SUBSIDIARY COMPONENT: PERFORMANCE CARD (3D STYLE) ---
 const StatCard = ({ label, value, icon: Icon, color }: any) => (
-  <div className="bg-[#121826] border border-gray-800 p-6 rounded-3xl flex flex-col justify-between h-32 shadow-xl hover:border-gray-700 transition-all group overflow-hidden relative">
+  <div className="bg-gradient-to-b from-[#1a1f2e] to-[#121826] border border-black/60 p-6 rounded-[1.5rem] flex flex-col justify-between h-32 shadow-[0_15px_30px_-5px_rgba(0,0,0,0.6)] hover:border-gray-700 transition-all group overflow-hidden relative active:scale-95">
+    {/* Inner highlight for convexity */}
+    <div className="absolute inset-x-0 top-0 h-px bg-white/10" />
+
     <div className="absolute top-0 right-0 p-2 opacity-5 group-hover:opacity-10 transition-opacity"><Icon className="w-16 h-16" /></div>
-    <div className="flex items-center justify-between mb-3">
-      <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest leading-none">{label}</span>
-      <div className={clsx("p-2 rounded-lg bg-gray-900/50 shadow-inner", color)}><Icon className="w-4 h-4" /></div>
+    <div className="flex items-center justify-between mb-3 relative z-10">
+      <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest leading-none">{label}</span>
+      <div className={clsx("p-2 rounded-lg bg-black/40 shadow-inner border border-white/5", color)}><Icon className="w-4 h-4" /></div>
     </div>
-    <span className="text-xl font-black text-gray-100 tracking-tighter tabular-nums">{value}</span>
+    <span className="text-xl font-black text-gray-100 tracking-tighter tabular-nums relative z-10">{value}</span>
   </div>
 );

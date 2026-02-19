@@ -182,7 +182,7 @@ export class WebRTCManager {
           target: this.targetId, 
           payload: { type: 'answer', sdp: { type: answer.type, sdp: answer.sdp } } 
         });
-      } 
+      }
       else if (payload.type === 'answer') {
         console.log(`[WebRTC] Processing ANSWER from ${this.targetId}`);
         const sdp = payload.sdp;
@@ -224,12 +224,12 @@ export class WebRTCManager {
   private setupDataChannel(channel: RTCDataChannel) {
     console.log(`[WebRTC] Setting up data channel for ${this.targetId}, label: ${channel.label}, id: ${channel.id}`);
     this.dataChannel = channel;
-    
+
     // ✅ CRITICAL: Force Binary Type to 'arraybuffer' to prevent corruption
     this.dataChannel.binaryType = 'arraybuffer';
-    
-    // Set threshold for backpressure (256KB)
-    this.dataChannel.bufferedAmountLowThreshold = 256 * 1024;
+
+    // Set initial threshold
+    this.dataChannel.bufferedAmountLowThreshold = this.bufferThreshold;
 
     this.dataChannel.onopen = () => {
       console.log(`[WebRTC] ✅ Data channel OPENED for ${this.targetId}, readyState: ${this.dataChannel?.readyState}`);
@@ -261,11 +261,58 @@ export class WebRTCManager {
         const decoder = new TextDecoder();
         const text = decoder.decode(e.data);
         if (text.startsWith('{')) {
-           // Pass JSON through as an ArrayBuffer to be handled by the pipeline
-           this.onData(e.data);
+          // Pass JSON through as an ArrayBuffer to be handled by the pipeline
+          this.onData(e.data);
         }
       }
     };
+  }
+
+
+  private setupTurboChannel(channel: RTCDataChannel) {
+    channel.binaryType = 'arraybuffer';
+    channel.bufferedAmountLowThreshold = 64 * 1024; // Keep light for speed
+
+    channel.onmessage = (e) => {
+      if (e.data instanceof ArrayBuffer) {
+        this.onData(e.data);
+      }
+    };
+
+    this.turboChannels.push(channel);
+  }
+
+  // ✅ ENABLE TURBO MODE (4 Parallel Channels)
+  public async enableTurboMode() {
+    if (this.isTurbo) return;
+    this.isTurbo = true;
+    console.log(`[WebRTC] 🚀 Enabling Turbo Mode (Parallel Channels)`);
+
+    // Create 3 additional channels (Total 4 including main)
+    for (let i = 1; i <= 3; i++) {
+      const channel = this.peerConnection.createDataChannel(`turbo-${i}`, { ordered: true });
+      this.setupTurboChannel(channel);
+    }
+  }
+
+  public disableTurboMode() {
+    if (!this.isTurbo) return;
+    this.isTurbo = false;
+    console.log(`[WebRTC] 🛑 Disabling Turbo Mode`);
+
+    // Close aux channels
+    this.turboChannels.forEach(c => c.close());
+    this.turboChannels = [];
+  }
+
+  // ✅ DYNAMIC BUFFER TUNING
+  public setBufferParams(limit: number, threshold: number) {
+    this.bufferLimit = limit;
+    this.bufferThreshold = threshold;
+    if (this.dataChannel) {
+      this.dataChannel.bufferedAmountLowThreshold = threshold;
+    }
+    console.log(`[WebRTC] Buffer tuned: Limit=${(limit / 1024 / 1024).toFixed(1)}MB, Threshold=${(threshold / 1024).toFixed(0)}KB`);
   }
 
   // ✅ OPTIMIZED SEND LOGIC (Event-Driven Backpressure)
@@ -298,12 +345,12 @@ export class WebRTCManager {
           this.dataChannel?.removeEventListener('bufferedamountlow', onLow);
           resolve();
         };
-        this.dataChannel?.addEventListener('bufferedamountlow', onLow);
+        targetChannel?.addEventListener('bufferedamountlow', onLow);
       });
     }
 
     try {
-      this.dataChannel.send(data);
+      targetChannel?.send(data);
     } catch (e) {
       console.error(`[WebRTC] Transmission failure to ${this.targetId}:`, e);
       throw e;
@@ -311,6 +358,7 @@ export class WebRTCManager {
   }
 
   public close() {
+    this.disableTurboMode();  // Cleanup Turbo Channels
     if (this.dataChannel) {
       this.dataChannel.onmessage = null;
       this.dataChannel.close();
