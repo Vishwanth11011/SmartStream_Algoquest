@@ -298,7 +298,7 @@ export const TransferRoom = () => {
 
     socket.on('user-joined', ({ id, username }) => {
       console.log(`[Socket] User joined: ${username} (${id})`);
-      addLog(`${username} entered the mesh.`);
+      addLog(`${username} entered the mesh. Initiating secure connection...`);
       setPeers(prev => prev.find(p => p.id === id) ? prev : [...prev, { id, username, status: 'Connecting...' }]);
       // NEW USER: Let them initiate connections (we wait for their offer)
       console.log(`[Socket] New user ${id} will initiate connection to us...`);
@@ -306,6 +306,11 @@ export const TransferRoom = () => {
 
     socket.on('existing-users', (users) => {
       console.log(`[Socket] Existing users received: ${users.length} users`);
+      if (users.length > 0) {
+        addLog(`Found ${users.length} existing peer(s) in room. Establishing connections...`);
+      } else {
+        addLog(`You are the first user in this room. Waiting for others to join...`);
+      }
       users.forEach((u: any) => {
         console.log(`[Socket] WE (new user) will initiate to existing user: ${u.username} (${u.id})`);
         setPeers(prev => prev.find(p => p.id === u.id) ? prev : [...prev, { id: u.id, username: u.username, status: 'Connecting...' }]);
@@ -592,7 +597,16 @@ export const TransferRoom = () => {
   // 6. SENDER ENGINE (SEQUENTIAL BROADCAST)
   // =========================================
   const startBatchTransfer = async (files: File[]) => {
-    if (peersRef.current.size === 0) return alert("Mesh Network Empty. Join a room first.");
+    console.log(`[Transfer] Checking peers - peersRef.size: ${peersRef.current.size}, peers state: ${peers.length}`);
+    console.log(`[Transfer] Peer details:`, Array.from(peersRef.current.keys()).map(id => ({ id, status: peers.find(p => p.id === id)?.status })));
+    
+    if (peersRef.current.size === 0) {
+      const message = isJoined 
+        ? `No peers connected yet. Please wait for other users to join the room "${roomId}" or check your connection.`
+        : 'Please join or create a room first.';
+      addLog(message);
+      return alert(message);
+    }
 
     setIsTransferring(true);
     const encoder = new TextEncoder();
