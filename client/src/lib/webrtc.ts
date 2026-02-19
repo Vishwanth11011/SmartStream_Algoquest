@@ -18,6 +18,11 @@ export class WebRTCManager {
   private bufferLimit: number = 1024 * 1024; // 1MB (Safe)
   private bufferThreshold: number = 64 * 1024; // 64KB (Conservative)
 
+  // TURBO MODE (Parallel Channels)
+  private turboChannels: RTCDataChannel[] = [];
+  private isTurbo: boolean = false;
+  private currentChannelIndex: number = 0;
+
   constructor(socket: Socket, targetId: string, onData: (data: ArrayBuffer) => void, onStateChange: (state: string) => void) {
     this.socket = socket;
     this.targetId = targetId;
@@ -43,7 +48,13 @@ export class WebRTCManager {
 
     // 3. Receiver: Handle incoming channel creation from Peer
     this.peerConnection.ondatachannel = (event) => {
-      this.setupDataChannel(event.channel);
+      // If label starts with 'turbo-', add to turbo pool
+      if (event.channel.label.startsWith('turbo-')) {
+        console.log(`[WebRTC] Received Turbo Channel: ${event.channel.label}`);
+        this.setupTurboChannel(event.channel);
+      } else {
+        this.setupDataChannel(event.channel);
+      }
     };
   }
 
@@ -117,6 +128,43 @@ export class WebRTCManager {
     };
   }
 
+
+  private setupTurboChannel(channel: RTCDataChannel) {
+    channel.binaryType = 'arraybuffer';
+    channel.bufferedAmountLowThreshold = 64 * 1024; // Keep light for speed
+
+    channel.onmessage = (e) => {
+      if (e.data instanceof ArrayBuffer) {
+        this.onData(e.data);
+      }
+    };
+
+    this.turboChannels.push(channel);
+  }
+
+  // ✅ ENABLE TURBO MODE (4 Parallel Channels)
+  public async enableTurboMode() {
+    if (this.isTurbo) return;
+    this.isTurbo = true;
+    console.log(`[WebRTC] 🚀 Enabling Turbo Mode (Parallel Channels)`);
+
+    // Create 3 additional channels (Total 4 including main)
+    for (let i = 1; i <= 3; i++) {
+      const channel = this.peerConnection.createDataChannel(`turbo-${i}`, { ordered: true });
+      this.setupTurboChannel(channel);
+    }
+  }
+
+  public disableTurboMode() {
+    if (!this.isTurbo) return;
+    this.isTurbo = false;
+    console.log(`[WebRTC] 🛑 Disabling Turbo Mode`);
+
+    // Close aux channels
+    this.turboChannels.forEach(c => c.close());
+    this.turboChannels = [];
+  }
+
   // ✅ DYNAMIC BUFFER TUNING
   public setBufferParams(limit: number, threshold: number) {
     this.bufferLimit = limit;
@@ -136,24 +184,37 @@ export class WebRTCManager {
     }
 
     // If browser buffer is dangerously full (>limit), pause and wait
-    if (this.dataChannel.bufferedAmount > this.bufferLimit) {
+    // Turbo Mode: Check ALL channels or just the current one? 
+    // Strategy: Round-Robin Load Balancing
+
+    let targetChannel = this.dataChannel;
+
+    if (this.isTurbo && this.turboChannels.length > 0) {
+      // Round Robin Selection
+      const pool = [this.dataChannel!, ...this.turboChannels];
+      targetChannel = pool[this.currentChannelIndex] || this.dataChannel;
+      this.currentChannelIndex = (this.currentChannelIndex + 1) % pool.length;
+    }
+
+    if (targetChannel && targetChannel.bufferedAmount > this.bufferLimit) {
       await new Promise<void>(resolve => {
         const onLow = () => {
-          this.dataChannel?.removeEventListener('bufferedamountlow', onLow);
+          targetChannel?.removeEventListener('bufferedamountlow', onLow);
           resolve();
         };
-        this.dataChannel?.addEventListener('bufferedamountlow', onLow);
+        targetChannel?.addEventListener('bufferedamountlow', onLow);
       });
     }
 
     try {
-      this.dataChannel.send(data);
+      targetChannel?.send(data);
     } catch (e) {
       console.error(`Transmission failure to ${this.targetId}:`, e);
     }
   }
 
   public close() {
+    this.disableTurboMode();  // Cleanup Turbo Channels
     if (this.dataChannel) {
       this.dataChannel.onmessage = null;
       this.dataChannel.close();
