@@ -631,7 +631,13 @@ export const TransferRoom = () => {
   // 6. SENDER ENGINE (SEQUENTIAL BROADCAST)
   // =========================================
   const startBatchTransfer = async (files: File[]) => {
-    if (peersRef.current.size === 0) return addToast('error', "Mesh Network Empty. Join a room first.");
+    if (peersRef.current.size === 0) {
+      return addToast('error', "Mesh Network Empty. Join a room first.");
+    }
+
+    if (!encryptionReady || keysRef.current.size === 0) {
+      return addToast('error', "Secure handshake not ready yet. Wait for the tunnel to initialize.");
+    }
 
     setIsTransferring(true);
     const encoder = new TextEncoder();
@@ -946,7 +952,10 @@ export const TransferRoom = () => {
               </motion.div>
             )}
             <div className={clsx("transition-all duration-500", isTransferring ? "opacity-50 blur-sm pointer-events-none scale-95" : "opacity-100")}>
-              <FilePicker onFilesSelected={startBatchTransfer} disabled={(!isJoined && peers.length === 0) || isTransferring || !encryptionReady} />
+              <FilePicker
+                onFilesSelected={startBatchTransfer}
+                disabled={!isJoined || peers.length === 0 || isTransferring}
+              />
             </div>
           </div>
 
