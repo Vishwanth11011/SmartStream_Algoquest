@@ -14,6 +14,7 @@ export class WebRTCManager {
   private targetId: string;
   private onData: (data: ArrayBuffer) => void;
   private onStateChange: (state: string) => void;
+  private bufferLimit: number = 8 * 1024 * 1024; // Default 8MB
 
   constructor(socket: Socket, targetId: string, onData: (data: ArrayBuffer) => void, onStateChange: (state: string) => void) {
     this.socket = socket;
@@ -114,6 +115,11 @@ export class WebRTCManager {
     };
   }
 
+  public setBufferLimit(limit: number) {
+    this.bufferLimit = limit;
+    console.log(`[WebRTC] Buffer limit adjusted to ${(limit / 1024 / 1024).toFixed(1)} MB`);
+  }
+
   // ✅ OPTIMIZED SEND LOGIC (Event-Driven Backpressure)
   // This prevents browser memory from overflowing and corrupting the stream
   public async sendData(data: ArrayBuffer): Promise<void> {
@@ -122,9 +128,8 @@ export class WebRTCManager {
       return;
     }
 
-    // If browser buffer is dangerously full (>8MB), pause and wait
-    // Increased to 8MB to allow more in-flight data (high throughput) without crashing
-    if (this.dataChannel.bufferedAmount > 8 * 1024 * 1024) {
+    // If browser buffer is dangerously full (>limit), pause and wait
+    if (this.dataChannel.bufferedAmount > this.bufferLimit) {
       await new Promise<void>(resolve => {
         const onLow = () => {
           this.dataChannel?.removeEventListener('bufferedamountlow', onLow);

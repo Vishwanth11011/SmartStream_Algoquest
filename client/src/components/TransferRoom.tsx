@@ -10,7 +10,7 @@ import { getCompressionStats } from '../lib/stats';
 import { FilePicker } from './FilePicker';
 import { TransferProgressStages, type TransferStage } from './TransferProgressStages';
 import {
-  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Zap, Terminal, Signal, Loader2, Users, Play, LogOut, ShieldAlert, Search, UserX, ChevronDown, ShieldCheck, Globe, Info
+  Cpu, Wifi, Download, Bell, Lock, Activity, Layers, Zap, Terminal, Signal, Loader2, Users, Play, LogOut, ShieldAlert, Search, UserX, ChevronDown, ShieldCheck, Globe, Info, XCircle, CheckCircle
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -158,6 +158,36 @@ export const TransferRoom = () => {
 
   // Terminal Logger
   const addLog = (msg: string) => setLogs(prev => [...prev.slice(-19), `${new Date().toLocaleTimeString()} - ${msg}`]);
+
+  // --- TOAST NOTIFICATIONS ---
+  const [toasts, setToasts] = useState<{ id: string, type: 'success' | 'error' | 'info', message: string }[]>([]);
+  const addToast = (type: 'success' | 'error' | 'info', message: string) => {
+    const id = Math.random().toString(36).substring(7);
+    setToasts(prev => [...prev, { id, type, message }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+  };
+
+  // --- BACK BUTTON PROTECTION ---
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      event.preventDefault();
+      // Push state back to prevent navigation
+      window.history.pushState(null, '', window.location.pathname);
+
+      const confirmLogout = window.confirm("Are you sure you want to log out? This will disconnect you from the mesh.");
+      if (confirmLogout) {
+        handleLogout();
+      }
+    };
+
+    // Push initial state
+    window.history.pushState(null, '', window.location.pathname);
+    window.addEventListener('popstate', handlePopState);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
 
   // =========================================
   // 1. CONNECTION FACTORY (WebRTC HANDSHAKE)
@@ -598,10 +628,19 @@ export const TransferRoom = () => {
   // 6. SENDER ENGINE (SEQUENTIAL BROADCAST)
   // =========================================
   const startBatchTransfer = async (files: File[]) => {
-    if (peersRef.current.size === 0) return alert("Mesh Network Empty. Join a room first.");
+    if (peersRef.current.size === 0) return addToast('error', "Mesh Network Empty. Join a room first.");
 
     setIsTransferring(true);
     const encoder = new TextEncoder();
+
+    // DYNAMIC BUFFER ALLOCATION (Speed Boost for 1-v-1)
+    const peerCount = peersRef.current.size;
+    const bufferLimit = peerCount === 1 ? 16 * 1024 * 1024 : 4 * 1024 * 1024; // 16MB for single, 4MB for mesh
+
+    peersRef.current.forEach(manager => {
+      manager.setBufferLimit(bufferLimit);
+    });
+    console.log(`[Sender] Optimized buffer limit set to ${(bufferLimit / 1024 / 1024)}MB for ${peerCount} peer(s)`);
 
     try {
       for (let i = 0; i < files.length; i++) {
@@ -629,7 +668,7 @@ export const TransferRoom = () => {
 
         // 3. Security Block
         if (meta.securityStatus === 'Suspicious') {
-          alert(`🚫 SECURITY BLOCK TRIGGERED\nFile: ${originalFile.name}\nRisk Score: ${meta.riskScore}%\nReason: ${meta.reason}`);
+          addToast('error', `🚫 Blocked: ${originalFile.name} (Risk: ${meta.riskScore}%)`);
           addLog(`🚫 Blocked potentially harmful file: ${originalFile.name}`);
           continue;
         }
@@ -930,7 +969,10 @@ export const TransferRoom = () => {
                     </div>
                     <div className="space-y-1.5">
                       <span className="text-gray-600 uppercase tracking-wider block font-bold">Compression Percentage</span>
-                      <div className="text-green-400 text-sm font-black italic">{((1 - advancedStats.compressedSize / advancedStats.originalSize) * 100).toFixed(2)}%</div>
+                      <div className="space-y-1.5">
+                        <span className="text-gray-600 uppercase tracking-wider block font-bold">Compression Percentage</span>
+                        <div className="text-green-400 text-sm font-black italic">{Math.max(0, (1 - advancedStats.compressedSize / advancedStats.originalSize) * 100).toFixed(2)}%</div>
+                      </div>
                     </div>
                     <div className="space-y-1.5">
                       <span className="text-gray-600 uppercase tracking-wider block font-bold">Transport Payload</span>
@@ -1029,6 +1071,34 @@ export const TransferRoom = () => {
         </div>
       </div>
 
+      {/* TOAST CONTAINER */}
+      <div className="fixed top-24 right-6 z-[100] flex flex-col gap-4 pointer-events-none">
+        <AnimatePresence>
+          {toasts.map(toast => (
+            <motion.div
+              key={toast.id}
+              initial={{ opacity: 0, x: 50, scale: 0.9 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 20, scale: 0.9 }}
+              className={clsx(
+                "pointer-events-auto flex items-center gap-3 px-5 py-4 rounded-2xl shadow-2xl border backdrop-blur-md min-w-[300px]",
+                toast.type === 'success' ? "bg-green-500/10 border-green-500/20 text-green-400" :
+                  toast.type === 'error' ? "bg-red-500/10 border-red-500/20 text-red-400" :
+                    "bg-blue-500/10 border-blue-500/20 text-blue-400"
+              )}
+            >
+              {toast.type === 'success' ? <CheckCircle className="w-5 h-5 flex-shrink-0" /> :
+                toast.type === 'error' ? <XCircle className="w-5 h-5 flex-shrink-0" /> :
+                  <Info className="w-5 h-5 flex-shrink-0" />}
+              <div>
+                <h4 className="font-bold text-sm uppercase tracking-wide">{toast.type}</h4>
+                <p className="text-xs font-medium opacity-90">{toast.message}</p>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
       {/* MODAL: INCOMING ENCRYPTED REQUEST */}
       <AnimatePresence>
         {incomingRequest && (
@@ -1055,8 +1125,6 @@ export const TransferRoom = () => {
                 >
                   Reject
                 </button>
-
-                {/* ✅ CONNECTED TO THE HANDSHAKE LOGIC */}
                 <button
                   onClick={acceptRequest}
                   className="flex-1 py-4 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white font-black text-xs uppercase tracking-widest shadow-xl shadow-blue-600/30 transition-all active:scale-95"
@@ -1079,6 +1147,7 @@ export const TransferRoom = () => {
           />
         </motion.div>
       )}
+
     </div>
   );
 };
