@@ -44,6 +44,12 @@ export class WebRTCManager {
       this.onStateChange(state);
     };
 
+    // 2b. Signaling State Monitoring
+    this.peerConnection.onsignalingstatechange = () => {
+      const state = this.peerConnection.signalingState;
+      console.log(`[WebRTC] Signaling state change for ${targetId}: ${state}`);
+    };
+
     // 3. ICE Connection State Monitoring
     this.peerConnection.oniceconnectionstatechange = () => {
       const state = this.peerConnection.iceConnectionState;
@@ -138,7 +144,7 @@ export class WebRTCManager {
   }
 
   private setupDataChannel(channel: RTCDataChannel) {
-    console.log(`[WebRTC] Setting up data channel for ${this.targetId}`);
+    console.log(`[WebRTC] Setting up data channel for ${this.targetId}, label: ${channel.label}, id: ${channel.id}`);
     this.dataChannel = channel;
     
     // ✅ CRITICAL: Force Binary Type to 'arraybuffer' to prevent corruption
@@ -148,7 +154,7 @@ export class WebRTCManager {
     this.dataChannel.bufferedAmountLowThreshold = 256 * 1024;
 
     this.dataChannel.onopen = () => {
-      console.log(`[WebRTC] ✅ Data channel OPENED for ${this.targetId}`);
+      console.log(`[WebRTC] ✅ Data channel OPENED for ${this.targetId}, readyState: ${this.dataChannel?.readyState}`);
       this.onStateChange('connected');
     };
     
@@ -158,12 +164,18 @@ export class WebRTCManager {
     };
     
     this.dataChannel.onerror = (error) => {
-      console.error(`[WebRTC] ❌ Data channel ERROR for ${this.targetId}:`, error);
+      console.error(`[WebRTC] ❌ Data channel ERROR for ${this.targetId}:`, error.error);
+    };
+    
+    // Monitor bufferedAmount changes
+    this.dataChannel.onbufferedamountlow = () => {
+      console.log(`[WebRTC] Buffered amount low for ${this.targetId}: ${this.dataChannel?.bufferedAmount} bytes`);
     };
     
     // Receiver: Direct raw data to the handler
     this.dataChannel.onmessage = (e) => {
-      console.log(`[WebRTC] Received message from ${this.targetId}, size: ${e.data.byteLength || 'unknown'}`);
+      const size = e.data instanceof ArrayBuffer ? e.data.byteLength : 'unknown';
+      console.log(`[WebRTC] Received message from ${this.targetId}, size: ${size} bytes`);
       if (e.data instanceof ArrayBuffer) {
         this.onData(e.data);
       } else {
@@ -183,19 +195,27 @@ export class WebRTCManager {
   public async sendData(data: ArrayBuffer): Promise<void> {
     if (!this.dataChannel) {
       console.error(`[WebRTC] No data channel available for ${this.targetId}`);
-      return;
+      throw new Error(`No data channel for ${this.targetId}`);
     }
 
-    if (this.dataChannel.readyState !== 'open') {
-      console.warn(`[WebRTC] Data channel not open for ${this.targetId}, state: ${this.dataChannel.readyState}`);
-      return;
+    const readyState = this.dataChannel.readyState;
+    if (readyState !== 'open') {
+      console.error(`[WebRTC] Data channel not open for ${this.targetId}, state: ${readyState}`);
+      throw new Error(`Data channel not open: ${readyState}`);
     }
 
     // If browser buffer is dangerously full (>1MB), pause and wait
     if (this.dataChannel.bufferedAmount > 1024 * 1024) {
-      console.warn(`[WebRTC] Backpressure detected, buffered: ${this.dataChannel.bufferedAmount} bytes`);
-      await new Promise<void>(resolve => {
+      console.warn(`[WebRTC] Backpressure detected for ${this.targetId}, buffered: ${this.dataChannel.bufferedAmount} bytes`);
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          console.error(`[WebRTC] Backpressure timeout for ${this.targetId}`);
+          this.dataChannel?.removeEventListener('bufferedamountlow', onLow);
+          reject(new Error('Backpressure timeout'));
+        }, 30000); // 30 second timeout
+        
         const onLow = () => {
+          clearTimeout(timeout);
           console.log(`[WebRTC] Backpressure relieved for ${this.targetId}`);
           this.dataChannel?.removeEventListener('bufferedamountlow', onLow);
           resolve();
@@ -208,6 +228,7 @@ export class WebRTCManager {
       this.dataChannel.send(data);
     } catch (e) {
       console.error(`[WebRTC] Transmission failure to ${this.targetId}:`, e);
+      throw e;
     }
   }
 

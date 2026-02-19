@@ -627,13 +627,48 @@ export const TransferRoom = () => {
         addLog(`🤖 Intelligence: Applied ${algoName} Strategy`);
 
         const activePeers = Array.from(peersRef.current.entries());
+        console.log(`[Sender] Total peers in network: ${activePeers.length}`);
+        
+        // Filter peers with open data channels and shared keys
+        const readyPeers = activePeers.filter(([peerId, manager]) => {
+          const sharedKey = keysRef.current.get(peerId);
+          const isReady = sharedKey && manager.dataChannel && manager.dataChannel.readyState === 'open';
+          console.log(`[Sender] Peer ${peerId}: sharedKey=${!!sharedKey}, hasDataChannel=${!!manager.dataChannel}, readyState=${manager.dataChannel?.readyState || 'N/A'}, ready=${isReady}`);
+          return isReady;
+        });
+        
+        console.log(`[Sender] Ready peers for transfer: ${readyPeers.length}/${activePeers.length}`);
+        
+        if (readyPeers.length === 0) {
+          console.error(`[Sender] No ready peers! Waiting for connections to stabilize...`);
+          addLog(`⚠️ Waiting for peer connections to stabilize...`);
+          await new Promise(r => setTimeout(r, 2000));
+          
+          const retryPeers = activePeers.filter(([peerId, manager]) => {
+            const sharedKey = keysRef.current.get(peerId);
+            return sharedKey && manager.dataChannel && manager.dataChannel.readyState === 'open';
+          });
+          console.log(`[Sender] Retry: ${retryPeers.length} peers ready`);
+          
+          if (retryPeers.length === 0) {
+            addLog(`❌ Transfer Failed: No active peer connections`);
+            setIsTransferring(false);
+            setQueueStatus('');
+            return;
+          }
+        }
+
         let peerCount = 1;
 
-        for (const [peerId, manager] of activePeers) {
+        for (const [peerId, manager] of readyPeers) {
           const sharedKey = keysRef.current.get(peerId);
-          if (!sharedKey || !manager.dataChannel || manager.dataChannel.readyState !== 'open') continue;
+          if (!sharedKey || !manager.dataChannel || manager.dataChannel.readyState !== 'open') {
+            console.warn(`[Sender] Skipping peer ${peerId} - not ready`);
+            continue;
+          }
 
-          setQueueStatus(`Mesh Broadcast: Target ${peerCount}/${activePeers.length}...`);
+          console.log(`[Sender] Starting transfer to peer ${peerCount}/${readyPeers.length}`);
+          setQueueStatus(`Mesh Broadcast: Target ${peerCount}/${readyPeers.length}...`);
           setProgress(0);
 
           // 4. Send Metadata (with original file size for compression percentage calculation)
@@ -646,10 +681,16 @@ export const TransferRoom = () => {
 
           // 5. Send Binary Pipeline
           setTransferStage('transferring');
+          console.log(`[Sender] Starting file pipeline for peer ${peerCount}`);
           const transferResult = await sendFilePipeline(processedData as any, sharedKey, algoName, async (chunk) => {
-            await manager.sendData(chunk);
-            setProgress(p => (p >= 98 ? 98 : p + 0.5));
+            try {
+              await manager.sendData(chunk);
+              setProgress(p => (p >= 98 ? 98 : p + 0.5));
+            } catch (err) {
+              console.error(`[Sender] Error sending chunk to peer ${peerCount}:`, err);
+            }
           });
+          console.log(`[Sender] File pipeline complete for peer ${peerCount}:`, transferResult);
           setTransferStage('transferred');
 
           // 6. Update Stats for Sender (Using unified compression stats utility)
@@ -663,19 +704,29 @@ export const TransferRoom = () => {
           });
 
           // Backpressure
+          console.log(`[Sender] Waiting for buffered data to flush (buffered: ${manager.dataChannel?.bufferedAmount || 0} bytes)`);
           // @ts-ignore
           while (manager.dataChannel?.bufferedAmount > 0) await new Promise(r => setTimeout(r, 100));
 
           // 7. Send Metadata (End)
+          console.log(`[Sender] Sending file-end metadata for peer ${peerCount}`);
           const endMeta = encoder.encode(JSON.stringify({ type: 'file-end', name: originalFile.name }));
           await manager.sendData(endMeta.buffer as ArrayBuffer);
 
           addLog(`Verifying integrity with Peer ${peerCount}...`);
           await new Promise<void>(resolve => {
             const check = setInterval(() => {
-              if (lastAckRef.current === originalFile.name) { clearInterval(check); resolve(); }
+              if (lastAckRef.current === originalFile.name) { 
+                console.log(`[Sender] Received ACK from peer ${peerCount}`);
+                clearInterval(check); 
+                resolve(); 
+              }
             }, 150);
-            setTimeout(() => { clearInterval(check); resolve(); }, 10000);
+            setTimeout(() => { 
+              console.log(`[Sender] ACK timeout for peer ${peerCount}`);
+              clearInterval(check); 
+              resolve(); 
+            }, 10000);
           });
 
           lastAckRef.current = '';
@@ -688,8 +739,8 @@ export const TransferRoom = () => {
       setQueueStatus('');
       addLog("Pipeline Empty - Batch Finished");
     } catch (e) {
-      console.error(e);
-      addLog("❌ Pipeline Error - Transfer Aborted");
+      console.error(`[Sender] Pipeline error:`, e);
+      addLog(`❌ Pipeline Error - Transfer Aborted`);
     } finally {
       setIsTransferring(false);
       setProgress(0);
