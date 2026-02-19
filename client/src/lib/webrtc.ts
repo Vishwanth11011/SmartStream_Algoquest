@@ -66,7 +66,7 @@ export class WebRTCManager {
   public async handleSignal(payload: any) {
     try {
       if (payload.type === 'offer') {
-        await this.peerConnection.setRemoteDescription({ type: 'offer', sdp: payload.sdp.sdp });
+        await this.peerConnection.setRemoteDescription(payload.sdp);
         const answer = await this.peerConnection.createAnswer();
         await this.peerConnection.setLocalDescription(answer);
         
@@ -76,7 +76,7 @@ export class WebRTCManager {
         });
       } 
       else if (payload.type === 'answer') {
-        await this.peerConnection.setRemoteDescription({ type: 'answer', sdp: payload.sdp.sdp });
+        await this.peerConnection.setRemoteDescription(payload.sdp);
       } 
       else if (payload.type === 'ice-candidate') {
         if (payload.candidate) {
