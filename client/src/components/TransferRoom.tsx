@@ -866,6 +866,11 @@ export const TransferRoom = () => {
 
           {/* FILE SELECTION PIPELINE */}
           <div className="relative z-10 group">
+            {/* DEBUG: State Inspector */}
+            {/* <div className="text-[10px] text-gray-600 font-mono mb-2">
+              Debug: Peers={peers.length}, Transferring={isTransferring ? 'YES' : 'NO'}, Encrypted={encryptionReady ? 'YES' : 'NO'}
+            </div> */}
+
             {queueStatus && (
               <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-4 bg-blue-500/10 border border-blue-500/20 p-4 rounded-2xl flex items-center justify-center gap-4 shadow-xl">
                 <Loader2 className="animate-spin text-blue-400 w-5 h-5" />
@@ -873,7 +878,10 @@ export const TransferRoom = () => {
               </motion.div>
             )}
             <div className={clsx("transition-all duration-500", isTransferring ? "opacity-50 blur-sm pointer-events-none scale-95" : "opacity-100")}>
-              <FilePicker onFilesSelected={startBatchTransfer} disabled={(!isJoined && peers.length === 0) || isTransferring || !encryptionReady} />
+              <FilePicker
+                onFilesSelected={startBatchTransfer}
+                disabled={peers.length === 0 || isTransferring}
+              />
             </div>
           </div>
 
