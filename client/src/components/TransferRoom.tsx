@@ -75,7 +75,17 @@ const decompressBlob = async (blob: Blob, algo: string, fileName: string): Promi
     try {
       console.log(`[Decompress] Creating DecompressionStream with format: ${format}`);
       const ds = new DecompressionStream(format);
-      const decompressedStream = blob.stream().pipeThrough(ds);
+      
+      // Recreate blob with correct MIME type for the compression format
+      let mimeType = 'application/octet-stream';
+      if (format === 'gzip') {
+        mimeType = 'application/gzip';
+      } else if (format === 'deflate') {
+        mimeType = 'application/x-deflate';
+      }
+      const typedBlob = new Blob([blobBuffer], { type: mimeType });
+      
+      const decompressedStream = typedBlob.stream().pipeThrough(ds);
       const decompressedBlob = await new Response(decompressedStream).blob();
 
       console.log(`[Decompress] SUCCESS! Decompressed size: ${decompressedBlob.size} bytes`);
@@ -143,6 +153,7 @@ export const TransferRoom = () => {
   const keyPairRef = useRef<CryptoKeyPair | null>(null);
   const receiverPipelineRef = useRef<ReceiverPipeline | null>(null);
   const lastAckRef = useRef<string>('');
+  const transferSpeedRef = useRef<string>('N/A');
 
   // --- UI & PIPELINE MONITORING ---
   const [isTransferring, setIsTransferring] = useState(false);
@@ -323,7 +334,17 @@ export const TransferRoom = () => {
     socket.on('user-joined', ({ id, username }) => {
       console.log(`[Socket] User joined: ${username} (${id})`);
       addLog(`${username} entered the mesh.`);
-      setPeers(prev => prev.find(p => p.id === id) ? prev : [...prev, { id, username, status: 'Connecting...' }]);
+      // Update if exists, otherwise add new peer with actual username
+      setPeers(prev => {
+        const existing = prev.find(p => p.id === id);
+        if (existing) {
+          // Update existing peer with the actual username (replace any Guest_ placeholder)
+          return prev.map(p => p.id === id ? { ...p, username } : p);
+        } else {
+          // Add new peer
+          return [...prev, { id, username, status: 'Connecting...' }];
+        }
+      });
       const manager = createPeerConnection(id, false);
       if (!manager) {
         console.error(`Failed to create peer connection for new user ${id}`);
@@ -347,8 +368,12 @@ export const TransferRoom = () => {
       peersRef.current.get(id)?.close();
       peersRef.current.delete(id);
       keysRef.current.delete(id);
-      setPeers(prev => prev.filter(p => p.id !== id));
       if (peersRef.current.size === 0) setEncryptionReady(false);
+      
+      // Remove user icon after 1 second delay
+      setTimeout(() => {
+        setPeers(prev => prev.filter(p => p.id !== id));
+      }, 1000);
     });
 
     return () => {
@@ -389,6 +414,28 @@ export const TransferRoom = () => {
       });
     }
   }, [peers]);
+
+  // --- ACTIVITY CHECK: Every 5 seconds, verify all users are active ---
+  useEffect(() => {
+    const activityCheckInterval = setInterval(() => {
+      setPeers(prev => {
+        const activePeers = prev.filter(peer => {
+          const manager = peersRef.current.get(peer.id);
+          // Check if peer connection is still alive
+          if (!manager || !manager.dataChannel || manager.dataChannel.readyState !== 'open') {
+            console.log(`[ActivityCheck] Removing inactive peer: ${peer.id}`);
+            peersRef.current.delete(peer.id);
+            keysRef.current.delete(peer.id);
+            return false;
+          }
+          return true;
+        });
+        return activePeers;
+      });
+    }, 5000);
+
+    return () => clearInterval(activityCheckInterval);
+  }, []);
 
   // =========================================
   // 4. USER INTERACTION HANDLERS
@@ -573,8 +620,16 @@ export const TransferRoom = () => {
                 const finalName = msg.name.replace(/\.gz$/, "").replace(/\.br$/, "").replace(/\.deflate$/, "");
                 const url = URL.createObjectURL(correctedBlob);
 
-                // NEW: Add timestamp
-                setReceivedFiles(prev => [{ name: finalName, url, timestamp: Date.now() }, ...prev]);
+                // NEW: Add timestamp and revoke old URLs to prevent memory leaks
+                setReceivedFiles(prev => {
+                  // Revoke old URL if we're replacing a file with the same name
+                  const oldFile = prev.find(f => f.name === finalName);
+                  if (oldFile) {
+                    URL.revokeObjectURL(oldFile.url);
+                    console.log(`[Receiver] Revoked old URL for: ${oldFile.name}`);
+                  }
+                  return [{ name: finalName, url, timestamp: Date.now() }, ...prev];
+                });
                 setTransferStage('complete');
                 console.log(`[Receiver] File ready for download: ${finalName}`);
 
@@ -688,62 +743,97 @@ export const TransferRoom = () => {
         addLog(`🤖 Intelligence: Applied ${algoName} Strategy`);
 
         const activePeers = Array.from(peersRef.current.entries());
-        let peerCount = 1;
+        setQueueStatus(`Mesh Broadcast: Sending to ${activePeers.length} peer(s)...`);
+        setProgress(0);
 
-        for (const [peerId, manager] of activePeers) {
+        // Send to all peers in PARALLEL with optimized handling
+        const transferPromises = activePeers.map(async ([peerId, manager], peerIndex) => {
           const sharedKey = keysRef.current.get(peerId);
-          if (!sharedKey || !manager.dataChannel || manager.dataChannel.readyState !== 'open') continue;
+          if (!sharedKey || !manager.dataChannel || manager.dataChannel.readyState !== 'open') {
+            console.warn(`[Sender] Skipping peer ${peerId} - no key or channel not ready`);
+            return;
+          }
 
-          setQueueStatus(`Mesh Broadcast: Target ${peerCount}/${activePeers.length}...`);
-          setProgress(0);
+          try {
+            console.log(`[Sender] Sending to peer ${peerIndex + 1}/${activePeers.length}: ${peerId}`);
 
-          // 4. Send Metadata (with original file size for compression percentage calculation)
-          setTransferStage('encrypting');
-          const metaObj = { type: 'file-start', name: originalFile.name, algo: algoName, originalSize: meta.originalSize };
-          console.log(`[Sender] Sending file-start metadata:`, metaObj);
-          const startMeta = encoder.encode(JSON.stringify(metaObj));
-          await manager.sendData(startMeta.buffer as ArrayBuffer);
-          setTransferStage('encrypted');
+            // 4. Send Metadata (fire and forget - don't await)
+            const metaObj = { type: 'file-start', name: originalFile.name, algo: algoName, originalSize: meta.originalSize };
+            const startMeta = encoder.encode(JSON.stringify(metaObj));
+            manager.sendData(startMeta.buffer as ArrayBuffer).catch(e => console.error(`[Sender] Metadata send failed for ${peerId}:`, e));
 
-          // 5. Send Binary Pipeline
-          setTransferStage('transferring');
-          const transferResult = await sendFilePipeline(processedData as any, sharedKey, algoName, async (chunk) => {
-            await manager.sendData(chunk);
-            setProgress(p => (p >= 98 ? 98 : p + 0.5));
-          });
-          setTransferStage('transferred');
+            // 5. Send Binary Pipeline - this is the heavy lifting
+            const transferResult = await sendFilePipeline(processedData as any, sharedKey, algoName, async (chunk) => {
+              try {
+                await manager.sendData(chunk);
+                // Update progress less frequently to reduce render thrashing
+                setProgress(p => (p >= 98 ? 98 : p + 0.3));
+              } catch (e) {
+                console.error(`[Sender] Failed to send chunk to ${peerId}:`, e);
+                throw e;
+              }
+            });
+            
+            // Store speed for later use in stats (average if multiple peers)
+            if (transferSpeedRef.current === 'N/A') {
+              transferSpeedRef.current = String(transferResult.speed);
+            } else {
+              const currentSpeed = parseFloat(transferSpeedRef.current);
+              const newSpeed = parseFloat(String(transferResult.speed));
+              const avgSpeed = ((currentSpeed + newSpeed) / 2).toFixed(2);
+              transferSpeedRef.current = avgSpeed;
+            }
 
-          // 6. Update Stats for Sender (Using unified compression stats utility)
-          const stats = getCompressionStats(meta.originalSize, meta.compressedSize);
-          setTransferStats({
-            originalSize: stats.originalSize,
-            finalSize: stats.compressedSize,
-            speed: transferResult.speed,
-            compressionPercent: stats.compressionPercent,
-            compressionRatio: stats.compressionRatio
-          });
+            // 6. Handle backpressure asynchronously (don't block other transfers)
+            // @ts-ignore
+            if (manager.dataChannel?.bufferedAmount > 0) {
+              await new Promise(r => {
+                const checkBuffer = setInterval(() => {
+                  // @ts-ignore
+                  if (manager.dataChannel?.bufferedAmount <= 64 * 1024) {
+                    clearInterval(checkBuffer);
+                    r(null);
+                  }
+                }, 50);
+                // Timeout after 5 seconds to prevent hanging
+                setTimeout(() => { clearInterval(checkBuffer); r(null); }, 5000);
+              });
+            }
 
-          // Backpressure
-          // @ts-ignore
-          while (manager.dataChannel?.bufferedAmount > 0) await new Promise(r => setTimeout(r, 100));
+            // 7. Send Metadata (End)
+            const endMeta = encoder.encode(JSON.stringify({ type: 'file-end', name: originalFile.name }));
+            manager.sendData(endMeta.buffer as ArrayBuffer).catch(e => console.error(`[Sender] End metadata failed for ${peerId}:`, e));
 
-          // 7. Send Metadata (End)
-          const endMeta = encoder.encode(JSON.stringify({ type: 'file-end', name: originalFile.name }));
-          await manager.sendData(endMeta.buffer as ArrayBuffer);
+            console.log(`[Sender] File sent to peer ${peerId}`);
 
-          addLog(`Verifying integrity with Peer ${peerCount}...`);
-          await new Promise<void>(resolve => {
-            const check = setInterval(() => {
-              if (lastAckRef.current === originalFile.name) { clearInterval(check); resolve(); }
-            }, 150);
-            setTimeout(() => { clearInterval(check); resolve(); }, 10000);
-          });
+            // Wait for ACK from this peer (with timeout)
+            await new Promise<void>(resolve => {
+              const check = setInterval(() => {
+                if (lastAckRef.current === originalFile.name) { clearInterval(check); resolve(); }
+              }, 150);
+              setTimeout(() => { clearInterval(check); resolve(); }, 15000);
+            });
 
-          lastAckRef.current = '';
-          peerCount++;
-        }
+            lastAckRef.current = '';
+          } catch (error) {
+            console.error(`[Sender] Error sending to peer ${peerId}:`, error);
+          }
+        });
 
-        addLog(`✅ Mesh Broadcast Complete: "${originalFile.name}"`);
+        // Wait for all peers to receive the file
+        await Promise.all(transferPromises);
+
+        // 6. Update Stats for Sender (Using unified compression stats utility)
+        const stats = getCompressionStats(meta.originalSize, meta.compressedSize);
+        setTransferStats({
+          originalSize: stats.originalSize,
+          finalSize: stats.compressedSize,
+          speed: transferSpeedRef.current,
+          compressionPercent: stats.compressionPercent,
+          compressionRatio: stats.compressionRatio
+        });
+
+        addLog(`✅ Mesh Broadcast Complete: "${originalFile.name}" sent to ${activePeers.length} peer(s)`);
         setProgress(100);
       }
       setQueueStatus('');
@@ -895,7 +985,7 @@ export const TransferRoom = () => {
                       className={clsx("w-14 h-14 rounded-2xl border-4 border-[#121826] flex items-center justify-center text-lg font-black text-white shadow-2xl transition-transform hover:scale-110 cursor-pointer relative z-10",
                         p.status === 'connected' ? "bg-gradient-to-br from-green-500 to-emerald-700 shadow-green-900/20" : "bg-gradient-to-br from-yellow-500 to-orange-700")}
                     >
-                      {p.username[0].toUpperCase()}
+                      {p.username && p.username.length > 0 ? p.username[0].toUpperCase() : '?'}
                     </motion.div>
                   ))}
                   {peers.length === 0 && <div className="text-gray-600 text-[10px] font-bold animate-pulse px-4 border-l border-gray-800 flex items-center h-14 uppercase tracking-widest">Awaiting Nodes...</div>}
