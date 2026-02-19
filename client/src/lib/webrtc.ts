@@ -47,40 +47,56 @@ export class WebRTCManager {
   // Sender: Initialize connection
   public async initConnection(isInitiator: boolean) {
     if (isInitiator) {
-      // ✅ 'ordered: true' ensures bits don't arrive shuffled (essential for PDF/IPYNB)
-      const channel = this.peerConnection.createDataChannel("file-transfer", { 
-        ordered: true 
-      });
-      this.setupDataChannel(channel);
-      
-      const offer = await this.peerConnection.createOffer();
-      await this.peerConnection.setLocalDescription(offer);
-      
-      this.socket.emit('signal', { 
-        target: this.targetId, 
-        payload: { type: 'offer', sdp: offer } 
-      });
+      try {
+        // ✅ 'ordered: true' ensures bits don't arrive shuffled (essential for PDF/IPYNB)
+        const channel = this.peerConnection.createDataChannel("file-transfer", { 
+          ordered: true 
+        });
+        this.setupDataChannel(channel);
+        
+        const offer = await this.peerConnection.createOffer();
+        await this.peerConnection.setLocalDescription(offer);
+        
+        this.socket.emit('signal', { 
+          target: this.targetId, 
+          payload: { type: 'offer', sdp: { type: offer.type, sdp: offer.sdp } } 
+        });
+      } catch (error) {
+        console.error("Error initializing connection:", error);
+      }
     }
   }
 
   public async handleSignal(payload: any) {
     try {
       if (payload.type === 'offer') {
-        await this.peerConnection.setRemoteDescription(payload.sdp);
+        const sdp = payload.sdp;
+        console.log('[WebRTC] Received offer, setting remote description');
+        await this.peerConnection.setRemoteDescription(new RTCSessionDescription({ 
+          type: 'offer', 
+          sdp: typeof sdp === 'string' ? sdp : sdp.sdp 
+        }));
+        
         const answer = await this.peerConnection.createAnswer();
         await this.peerConnection.setLocalDescription(answer);
         
         this.socket.emit('signal', { 
           target: this.targetId, 
-          payload: { type: 'answer', sdp: answer } 
+          payload: { type: 'answer', sdp: { type: answer.type, sdp: answer.sdp } } 
         });
       } 
       else if (payload.type === 'answer') {
-        await this.peerConnection.setRemoteDescription(payload.sdp);
+        const sdp = payload.sdp;
+        console.log('[WebRTC] Received answer, setting remote description');
+        await this.peerConnection.setRemoteDescription(new RTCSessionDescription({ 
+          type: 'answer', 
+          sdp: typeof sdp === 'string' ? sdp : sdp.sdp 
+        }));
       } 
       else if (payload.type === 'ice-candidate') {
         if (payload.candidate) {
-          await this.peerConnection.addIceCandidate(payload.candidate);
+          console.log('[WebRTC] Adding ICE candidate');
+          await this.peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
         }
       }
     } catch (error) {
@@ -97,8 +113,19 @@ export class WebRTCManager {
     // Set threshold for backpressure (256KB)
     this.dataChannel.bufferedAmountLowThreshold = 256 * 1024;
 
-    this.dataChannel.onopen = () => this.onStateChange('connected');
-    this.dataChannel.onclose = () => this.onStateChange('disconnected');
+    this.dataChannel.onopen = () => {
+      console.log('[WebRTC] Data channel opened');
+      this.onStateChange('connected');
+    };
+    
+    this.dataChannel.onclose = () => {
+      console.log('[WebRTC] Data channel closed');
+      this.onStateChange('disconnected');
+    };
+    
+    this.dataChannel.onerror = (error) => {
+      console.error('[WebRTC] Data channel error:', error);
+    };
     
     // Receiver: Direct raw data to the handler
     this.dataChannel.onmessage = (e) => {
