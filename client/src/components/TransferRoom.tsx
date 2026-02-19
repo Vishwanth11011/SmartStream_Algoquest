@@ -282,6 +282,7 @@ export const TransferRoom = () => {
           if (keyPairRef.current) {
             const shared = await deriveSharedKey(keyPairRef.current.privateKey, foreignKey);
             keysRef.current.set(sender, shared);
+            console.log(`[Socket] ✅ Shared key established for ${sender}`);
             addLog(`🔐 AES-256 secure tunnel synced with ${sender.slice(0, 4)}`);
             setEncryptionReady(true);
             setPeers(prev => prev.map(p => p.id === sender ? { ...p, status: 'connected' } : p));
@@ -629,31 +630,57 @@ export const TransferRoom = () => {
         const activePeers = Array.from(peersRef.current.entries());
         console.log(`[Sender] Total peers in network: ${activePeers.length}`);
         
-        // Filter peers with open data channels and shared keys
-        const readyPeers = activePeers.filter(([peerId, manager]) => {
+        // Helper to check if peer is ready
+        const isPeerReady = (peerId: string, manager: any) => {
           const sharedKey = keysRef.current.get(peerId);
           const isReady = sharedKey && manager.dataChannel && manager.dataChannel.readyState === 'open';
-          console.log(`[Sender] Peer ${peerId}: sharedKey=${!!sharedKey}, hasDataChannel=${!!manager.dataChannel}, readyState=${manager.dataChannel?.readyState || 'N/A'}, ready=${isReady}`);
           return isReady;
-        });
+        };
         
-        console.log(`[Sender] Ready peers for transfer: ${readyPeers.length}/${activePeers.length}`);
+        // Wait for peers to be ready with timeout
+        let readyPeers = activePeers.filter(([peerId, manager]) => isPeerReady(peerId, manager));
+        console.log(`[Sender] Initial check - Ready peers: ${readyPeers.length}/${activePeers.length}`);
         
         if (readyPeers.length === 0) {
-          console.error(`[Sender] No ready peers! Waiting for connections to stabilize...`);
-          addLog(`⚠️ Waiting for peer connections to stabilize...`);
-          await new Promise(r => setTimeout(r, 2000));
+          console.warn(`[Sender] ⏳ No ready peers found. Waiting for connections to stabilize (max 15 seconds)...`);
+          addLog(`⏳ Waiting for peer connections to stabilize...`);
           
-          const retryPeers = activePeers.filter(([peerId, manager]) => {
-            const sharedKey = keysRef.current.get(peerId);
-            return sharedKey && manager.dataChannel && manager.dataChannel.readyState === 'open';
-          });
-          console.log(`[Sender] Retry: ${retryPeers.length} peers ready`);
+          let waitTime = 0;
+          const maxWait = 15000; // 15 seconds
+          const checkInterval = 500; // Check every 500ms
           
-          if (retryPeers.length === 0) {
-            addLog(`❌ Transfer Failed: No active peer connections`);
+          while (waitTime < maxWait) {
+            await new Promise(r => setTimeout(r, checkInterval));
+            waitTime += checkInterval;
+            
+            readyPeers = activePeers.filter(([peerId, manager]) => isPeerReady(peerId, manager));
+            
+            if (readyPeers.length > 0) {
+              console.log(`[Sender] ✅ Peers ready after ${waitTime}ms: ${readyPeers.length} peers`);
+              break;
+            }
+            
+            // Log status every 2 seconds
+            if (waitTime % 2000 === 0) {
+              console.log(`[Sender] Status check at ${waitTime}ms:`);
+              activePeers.forEach(([peerId, manager]) => {
+                const sharedKey = keysRef.current.get(peerId);
+                const dcState = manager.dataChannel?.readyState || 'N/A';
+                console.log(`  - Peer ${peerId.slice(0, 6)}: sharedKey=${!!sharedKey}, dataChannel=${dcState}`);
+              });
+            }
+          }
+          
+          if (readyPeers.length === 0) {
+            console.error(`[Sender] ❌ Timeout: No peers ready after ${maxWait}ms`);
+            activePeers.forEach(([peerId, manager]) => {
+              const sharedKey = keysRef.current.get(peerId);
+              console.error(`  Final state - Peer ${peerId.slice(0, 6)}: sharedKey=${!!sharedKey}, dataChannel=${manager.dataChannel?.readyState || 'N/A'}`);
+            });
+            addLog(`❌ Transfer Failed: Connections could not stabilize`);
             setIsTransferring(false);
             setQueueStatus('');
+            setProgress(0);
             return;
           }
         }
