@@ -146,7 +146,7 @@ export const TransferRoom = () => {
 
   // --- UI & PIPELINE MONITORING ---
   const [isTransferring, setIsTransferring] = useState(false);
-  const [encryptionReady, setEncryptionReady] = useState(false);
+  const [, setEncryptionReady] = useState(false);
   const [, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [receivedFiles, setReceivedFiles] = useState<{ name: string, url: string }[]>([]);
