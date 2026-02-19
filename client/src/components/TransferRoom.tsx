@@ -171,20 +171,25 @@ export const TransferRoom = () => {
     }
 
     const manager = new WebRTCManager(socket, targetId,
-      (data) => handleIncomingData(data, targetId),
+      (data) => {
+        console.log(`[createPeerConnection] Data received from ${targetId}`);
+        handleIncomingData(data, targetId);
+      },
       (state) => {
-        console.log(`[WebRTC] State change for ${targetId}: ${state}`);
+        console.log(`[createPeerConnection] State callback - ${targetId}: ${state}`);
         setPeers(prev => prev.map(p => p.id === targetId ? { ...p, status: state } : p));
+        
         if (state === 'connected') {
+          console.log(`[createPeerConnection] ✅ Connection CONNECTED to ${targetId}`);
           setP2pState('connected');
           if (keyPairRef.current) {
             exportPublicKey(keyPairRef.current.publicKey).then(k => {
-              console.log(`[WebRTC] Sending pub-key to ${targetId}`);
+              console.log(`[createPeerConnection] Sending pub-key to ${targetId}`);
               socket.emit('signal', { target: targetId, payload: { type: 'pub-key', key: k } });
             });
           }
-        } else if (state === 'failed' || state === 'closed') {
-          console.log(`[WebRTC] Closing connection to ${targetId}`);
+        } else if (state === 'failed' || state === 'closed' || state === 'disconnected') {
+          console.log(`[createPeerConnection] ❌ Connection ${state} for ${targetId}`);
           peersRef.current.delete(targetId);
           keysRef.current.delete(targetId);
         }
@@ -241,9 +246,11 @@ export const TransferRoom = () => {
     });
 
     socket.on('signal', async ({ sender, payload }) => {
+      console.log(`[Socket] Received signal from ${sender}, type: ${payload.type}`);
       let manager = peersRef.current.get(sender);
 
       if (!manager) {
+        console.log(`[Socket] No existing manager for ${sender}, creating new one`);
         setPeers(prev => prev.find(p => p.id === sender) ? prev : [...prev, { id: sender, username: `Guest_${sender.slice(0, 4)}`, status: 'Connecting...' }]);
         manager = createPeerConnection(sender, false);
         // Ensure manager is properly initialized before handling signal
@@ -254,11 +261,13 @@ export const TransferRoom = () => {
       }
 
       if (manager) {
+        console.log(`[Socket] Routing signal to manager for ${sender}`);
         await manager.handleSignal(payload);
       }
 
       // ✅ CAPTURE SENDER ID HERE
       if (payload.type === 'conn-request') {
+        console.log(`[Socket] Connection request from ${sender}`);
         setIncomingRequest({
           from: payload.username || sender,
           key: payload.key,
@@ -267,6 +276,7 @@ export const TransferRoom = () => {
       }
 
       if (payload.type === 'pub-key') {
+        console.log(`[Socket] Public key received from ${sender}`);
         try {
           const foreignKey = await importPublicKey(payload.key);
           if (keyPairRef.current) {
