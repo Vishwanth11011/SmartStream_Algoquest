@@ -168,6 +168,7 @@ export const TransferRoom = () => {
   };
 
   // --- BACK BUTTON PROTECTION ---
+  // Active on Mount: Protects against accidental back navigation even if not yet in a room
   useEffect(() => {
     const handlePopState = (event: PopStateEvent) => {
       event.preventDefault();
@@ -633,14 +634,19 @@ export const TransferRoom = () => {
     setIsTransferring(true);
     const encoder = new TextEncoder();
 
-    // DYNAMIC BUFFER ALLOCATION (Speed Boost for 1-v-1)
+    // DYNAMIC BUFFER ALLOCATION (SAFE MODE)
+    // 1 Peer = 3MB Limit (Sweet Spot - Fast & Safe)
+    // >1 Peer = 1MB Limit (Conservative - Prevents Mesh Congestion)
     const peerCount = peersRef.current.size;
-    const bufferLimit = peerCount === 1 ? 16 * 1024 * 1024 : 4 * 1024 * 1024; // 16MB for single, 4MB for mesh
+    const bufferLimit = peerCount === 1 ? 3 * 1024 * 1024 : 1 * 1024 * 1024;
+    const bufferThreshold = peerCount === 1 ? 256 * 1024 : 64 * 1024;
 
     peersRef.current.forEach(manager => {
-      manager.setBufferLimit(bufferLimit);
+      // @ts-ignore - method added in webrtc.ts
+      if (typeof manager.setBufferParams === 'function') {
+        manager.setBufferParams(bufferLimit, bufferThreshold);
+      }
     });
-    console.log(`[Sender] Optimized buffer limit set to ${(bufferLimit / 1024 / 1024)}MB for ${peerCount} peer(s)`);
 
     try {
       for (let i = 0; i < files.length; i++) {

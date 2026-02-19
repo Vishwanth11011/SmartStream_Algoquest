@@ -14,7 +14,9 @@ export class WebRTCManager {
   private targetId: string;
   private onData: (data: ArrayBuffer) => void;
   private onStateChange: (state: string) => void;
-  private bufferLimit: number = 8 * 1024 * 1024; // Default 8MB
+  // Dynamic Buffer Control (Safe Defaults)
+  private bufferLimit: number = 1024 * 1024; // 1MB (Safe)
+  private bufferThreshold: number = 64 * 1024; // 64KB (Conservative)
 
   constructor(socket: Socket, targetId: string, onData: (data: ArrayBuffer) => void, onStateChange: (state: string) => void) {
     this.socket = socket;
@@ -93,8 +95,8 @@ export class WebRTCManager {
     // ✅ CRITICAL: Force Binary Type to 'arraybuffer' to prevent corruption
     this.dataChannel.binaryType = 'arraybuffer';
 
-    // Set threshold for backpressure (512KB) - Wake up sooner to keep pipe full
-    this.dataChannel.bufferedAmountLowThreshold = 512 * 1024;
+    // Set initial threshold
+    this.dataChannel.bufferedAmountLowThreshold = this.bufferThreshold;
 
     this.dataChannel.onopen = () => this.onStateChange('connected');
     this.dataChannel.onclose = () => this.onStateChange('disconnected');
@@ -115,9 +117,14 @@ export class WebRTCManager {
     };
   }
 
-  public setBufferLimit(limit: number) {
+  // ✅ DYNAMIC BUFFER TUNING
+  public setBufferParams(limit: number, threshold: number) {
     this.bufferLimit = limit;
-    console.log(`[WebRTC] Buffer limit adjusted to ${(limit / 1024 / 1024).toFixed(1)} MB`);
+    this.bufferThreshold = threshold;
+    if (this.dataChannel) {
+      this.dataChannel.bufferedAmountLowThreshold = threshold;
+    }
+    console.log(`[WebRTC] Buffer tuned: Limit=${(limit / 1024 / 1024).toFixed(1)}MB, Threshold=${(threshold / 1024).toFixed(0)}KB`);
   }
 
   // ✅ OPTIMIZED SEND LOGIC (Event-Driven Backpressure)
