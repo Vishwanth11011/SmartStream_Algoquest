@@ -785,7 +785,7 @@ export const TransferRoom = () => {
 
           {/* DIRECT SEARCH FALLBACK (VISIBLE WHEN NOT IN ROOM) */}
           {!isJoined && (
-            <div className="bg-[#121826] border border-gray-800 rounded-3xl p-6 shadow-xl relative z-20">
+            <div className="hidden bg-[#121826] border border-gray-800 rounded-3xl p-6 shadow-xl relative z-20">
               <h2 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-3"><Signal className="w-4 h-4 text-blue-400" /> Direct Handshake</h2>
               <div className="relative group">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5 group-focus-within:text-blue-500 transition-colors" />
