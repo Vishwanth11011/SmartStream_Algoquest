@@ -206,20 +206,9 @@ io.on('connection', (socket) => {
   });
 
   // C. SIGNAL RELAY (Targeted P2P Handshake)
-  // Supports both direct socket.id and username (case-insensitive) as targets
+  // This replaces the old 'file-relay' for the mesh network
   socket.on('signal', ({ target, payload }) => {
-    let targetId: string = target;
-
-    // If the client sent a username string, resolve it to the latest socket id
-    if (typeof target === 'string') {
-      const cleanTarget = target.trim().toLowerCase();
-      const mapped = usernameToSocket.get(cleanTarget);
-      if (mapped) {
-        targetId = mapped;
-      }
-    }
-
-    io.to(targetId).emit('signal', { sender: socket.id, payload });
+    io.to(target).emit('signal', { sender: socket.id, payload });
   });
 
   // D. User Check (Search Filter - Backward Compatibility)
