@@ -584,7 +584,7 @@ export const TransferRoom = () => {
 
     if (receiverPipelineRef.current) {
       receiverPipelineRef.current.processChunk(data);
-      setProgress(p => (p >= 98 ? 98 : p + 0.5));
+      // Progress updates are deferred to when transfer completes (set to 100% when done)
     }
   };
 
@@ -713,15 +713,21 @@ export const TransferRoom = () => {
           setTransferStage('transferring');
           console.log(`[Sender] Starting file pipeline for peer ${peerCount}`);
           const transferResult = await sendFilePipeline(processedData as any, sharedKey, algoName, async (chunk) => {
+            if (!manager.dataChannel || manager.dataChannel.readyState !== 'open') {
+              console.error(`[Sender] Data channel closed during transfer to peer ${peerCount}`);
+              throw new Error('Data channel closed');
+            }
             try {
               await manager.sendData(chunk);
-              setProgress(p => (p >= 98 ? 98 : p + 0.5));
+              // Progress updates are deferred to final progress bar update
             } catch (err) {
               console.error(`[Sender] Error sending chunk to peer ${peerCount}:`, err);
+              throw err;
             }
           });
           console.log(`[Sender] File pipeline complete for peer ${peerCount}:`, transferResult);
           setTransferStage('transferred');
+          setProgress(100);
 
           // 6. Update Stats for Sender (Using unified compression stats utility)
           const stats = getCompressionStats(meta.originalSize, meta.compressedSize);
