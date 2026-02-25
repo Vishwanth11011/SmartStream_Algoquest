@@ -1,0 +1,329 @@
+
+================================================================================
+      SMARTSTREAM — DECISION-TREE COMPRESSION PIPELINE: FULL EXPLANATION
+================================================================================
+
+FILE: client/src/lib/compression.ts
+ENTRY POINT: processFile(file: File)
+
+
+--------------------------------------------------------------------------------
+WHAT IS "DECISION-TREE COMPRESSION"?
+--------------------------------------------------------------------------------
+
+The SmartStream compression system does NOT use a machine-learning decision tree.
+Instead, it uses a hand-coded HEURISTIC DECISION TREE — a series of if/else
+branches that analyze a file, make security checks, and then pick the best
+compression algorithm. Think of it as a flowchart built into code.
+
+The entire pipeline has 4 distinct stages:
+
+  STAGE 1: Entropy Calculation
+  STAGE 2: File Family Detection (Magic Numbers)
+  STAGE 3: Security Screening (6 checks)
+  STAGE 4: Algorithm Selection (the actual decision tree)
+
+Each stage feeds information to the next. Together, they form a pipeline that
+processes every file before it is sent over the network.
+
+
+================================================================================
+STAGE 1 — ENTROPY CALCULATION
+================================================================================
+
+FUNCTION: calculateEntropy(data: Uint8Array): number
+
+Entropy (Shannon Entropy) measures how "random" the bytes in a file are.
+The value ranges from 0.0 (completely predictable) to 8.0 (fully random).
+
+HOW IT WORKS:
+  1. Count how many times each of the 256 possible byte values appears.
+  2. For each byte value, compute its probability: p = count / total_bytes.
+  3. Apply the Shannon formula:  H = -SUM( p * log2(p) )
+  4. Return H.
+
+WHY IS THIS IMPORTANT?
+  - Low entropy (0–5)  → File has repetitive patterns → Compresses well.
+  - Medium entropy (5–7.5) → Mixed content → Compresses reasonably.
+  - High entropy (>7.8) → File is already compressed, encrypted, or random → 
+    Compressing again wastes CPU and makes the file LARGER.
+
+The system samples only the first 512 KB (SAMPLE_SIZE = 512 * 1024) for speed
+instead of reading the entire file.
+
+
+================================================================================
+STAGE 2 — FILE FAMILY DETECTION (Magic Numbers)
+================================================================================
+
+FUNCTION: detectCompressionFamily(header: Uint8Array): string
+
+This reads the first 8 bytes of the file (the "magic number" or "file header")
+and checks it against known byte signatures to identify what kind of file it is.
+
+No file extension is trusted here — the raw bytes tell the truth.
+
+FAMILIES DETECTED:
+
+  A. DEFLATE FAMILY
+     • DEFLATE_ZIP  → ZIP files      (Magic: 50 4B 03 04  →  "PK\x03\x04")
+     • DEFLATE_PNG  → PNG images     (Magic: 89 50 4E 47  →  \x89PNG)
+     • DEFLATE_GZIP → Gzip archives  (Magic: 1F 8B)
+
+  B. LZMA FAMILY
+     • LZMA_7Z  → 7-Zip archives     (Magic: 37 7A BC AF 27 1C  →  "7z\xBC\xAF'\x1C")
+     • LZMA_XZ  → XZ archives        (Magic: FD 37 7A 58 5A 00)
+
+  C. ZSTD FAMILY
+     • ZSTD     → Facebook Zstandard (Magic: 28 B5 2F FD)
+
+  D. LZW FAMILY
+     • LZW_GIF  → GIF images         (Magic: 47 49 46 38  →  "GIF8")
+     • LZW_TIFF → TIFF images        (Magic: 49 49 2A 00 or 4D 4D 00 2A)
+
+  E. DCT MEDIA FAMILY
+     • DCT_JPEG → JPEG images        (Magic: FF D8 FF)
+     • DCT_VIDEO → MP4/MOV videos   (contains "ftyp" or "moov" in header)
+
+  F. AUDIO PREDICTIVE FAMILY
+     • AUDIO_MP3  → MP3 audio       (Magic: 49 44 33  →  "ID3", or sync bits FF F3/F2)
+     • AUDIO_FLAC → FLAC audio      (Magic: 66 4C 61 43  →  "fLaC")
+
+  G. TEXT / DATA
+     • TEXT_DATA → JSON, XML, code, plain text (detected by readable ASCII start)
+
+  H. UNKNOWN_BINARY
+     • Everything else
+
+WHY DETECT FAMILIES?
+  The decision tree must know the file type to avoid double-compressing files
+  that are already compressed (like JPEG, MP3, ZIP). It also feeds the security
+  checks to catch file-type mismatches (e.g., an EXE disguised as a PDF).
+
+
+================================================================================
+STAGE 3 — SECURITY SCREENING (6-Layer Malware Detection)
+================================================================================
+
+Before any compression happens, the file passes through 6 sequential security
+checks. Any check can set: securityStatus = 'Suspicious', and assign a riskScore.
+
+CHECK 1 — DANGEROUS EXTENSION BLOCK (riskScore 98)
+  Blocks: .exe .dll .sys .scr .bat .cmd .com .msi .sh .bash .zsh
+          .ps1 .psd1 .psm1 .psc1 .jar .app .dmg .ipa
+  Reason: Executables and scripts are inherently dangerous to transfer.
+
+CHECK 2 — FILE TYPE MISMATCH (riskScore 99)
+  Compares the file header magic bytes against the file extension.
+  Example: A file named "report.pdf" whose first 2 bytes are "MZ" (Windows EXE)
+  gets flagged because MZ headers only belong to .exe/.dll/.sys files.
+  This catches disguised malware.
+
+CHECK 3 — ABNORMAL ENTROPY IN TEXT FILES (riskScore 92)
+  For text/code extensions (.txt .js .json .xml .csv .md .html .css):
+  If entropy > 7.8 AND the file is NOT a known binary format,
+  it is flagged because plain text should never be nearly-random.
+  High entropy in a .txt file = likely encrypted payload hidden inside.
+
+CHECK 4 — RANSOMWARE THRESHOLD (riskScore 90)
+  Specifically targets .txt, .js, .json, .ipynb files.
+  If entropy > 7.9 (RANSOMWARE_THRESHOLD), it is flagged.
+  This is a secondary stricter check targeting common ransomware payload hiding.
+
+CHECK 5 — DOUBLE EXTENSION DETECTION (riskScore 97)
+  Example: "document.pdf.exe" has two dots → the LAST extension is .exe.
+  Attackers use this to fool users who see "document.pdf" as the visible name.
+  Any file where the last extension is a dangerous one gets flagged.
+
+CHECK 6 — SCRIPT INJECTION PATTERNS (riskScore 88)
+  Scans the first 10,000 bytes of the file text for known injection patterns:
+    <script>, javascript:, onerror=, onload=, eval(), exec(), system(), WScript.Shell
+  If found in an HTML/HTM file, it is flagged as potential XSS or malicious HTML.
+
+SPECIAL CASE — ZIP EXEMPTION:
+  Files with a .zip extension are immediately returned as-is (Store / No-Op),
+  skipping ALL compression AND all security checks. Reason: ZIP files are
+  already compressed and re-compressing them wastes CPU.
+
+
+================================================================================
+STAGE 4 — THE DECISION TREE (ALGORITHM SELECTION)
+================================================================================
+
+This is the core "decision tree" — two branches that select one of three
+possible algorithms based on the file family and MIME type.
+
+DECISION TREE FLOWCHART:
+────────────────────────
+
+                        ┌─────────────────────┐
+                        │      File arrives    │
+                        └──────────┬──────────┘
+                                   │
+                        ┌──────────▼──────────┐
+                        │  Is it a .zip file?  │
+                        └──────────┬──────────┘
+                         YES ──────▼
+                        ┌──────────────────────┐
+                        │  Store (No-Op). DONE │
+                        └──────────────────────┘
+                         NO ───────▼
+                        ┌──────────────────────────────────────┐
+                        │  Is family == TEXT_DATA               │
+                        │  OR MIME contains "text"              │
+                        │  OR extension is .json, .js, .ipynb? │
+                        └──────────────────────────────────────┘
+                         YES ────────────────▼
+                        ┌───────────────────────────┐
+                        │  Try DEFLATE (Level 9)    │
+                        │  → If fails: Gzip Level 6 │
+                        └───────────────────────────┘
+                         NO ─────────────────▼
+                        ┌───────────────────────────┐
+                        │  Try GZIP (Level 6)       │
+                        │  → If fails: Store (raw)  │
+                        └───────────────────────────┘
+
+
+================================================================================
+ALGORITHMS USED — HOW MANY AND WHY
+================================================================================
+
+SmartStream uses EXACTLY 2 primary compression algorithms (+ 1 fallback Store):
+
+
+ALGORITHM 1: DEFLATE (Level 9 — Ultra Maximum)
+───────────────────────────────────────────────
+  Library: fflate (deflateSync)
+  Used for: TEXT_DATA family, text/* MIME types, .json, .js, .ipynb files.
+  Level 9 is the highest compression level — maximum CPU, minimum output size.
+
+  WHY DEFLATE FOR TEXT?
+  Deflate is a combination of LZ77 (dictionary-based) + Huffman coding.
+  Text files have enormous repetition (words, tokens, whitespace, brackets).
+  LZ77 replaces repeated sequences with back-references. Huffman then encodes
+  the most common symbols with fewer bits. Together they achieve 60–80% reduction
+  on typical JSON/code/text.
+
+  Level 9 is chosen deliberately for text because:
+  ✓ Text compression is CPU-cheap (CPU is not the bottleneck in file transfer).
+  ✓ Smaller payload = faster network transfer = better user experience.
+  ✓ Text files can be 20–900x more compressible than images or binaries.
+
+
+ALGORITHM 2: GZIP (Level 6 — Standard)
+───────────────────────────────────────
+  Library: fflate (gzipSync)
+  Used for: Everything else — images, videos, PDFs, binaries, unknown formats.
+  Level 6 is the "balanced" level — reasonable compression, moderate CPU.
+
+  WHY GZIP FOR EVERYTHING ELSE?
+  Gzip = Deflate + a small wrapper header/trailer (for checksums and metadata).
+  It is the most universally supported compression format on the web.
+
+  Level 6 (not level 9) is chosen because:
+  ✓ Binary and media files are already compressed or have low redundancy.
+  ✓ Going from level 6 to level 9 on binary data gives only 0.1–0.5% extra gain.
+  ✓ Level 6 avoids wasting CPU on diminishing returns.
+  ✓ It provides a consistent, predictable compressed envelope for all other data.
+
+  NOTE: Even JPEG, MP3, PNG are wrapped in Gzip. The code comment says:
+  "Even if already compressed, we wrap them in Gzip as requested."
+  This is an intentional design trade-off: consistency over optimal compression.
+
+
+FALLBACK — STORE (No-Op / Raw Passthrough)
+──────────────────────────────────────────
+  Not really an "algorithm" — just passes the raw bytes unchanged.
+  Used when:
+  ✓ The file is a .zip (early exit, skip everything).
+  ✓ Deflate throws an error → fallback to Gzip, then if Gzip also fails → Store.
+  ✓ A compression error occurs that cannot be recovered.
+
+  WHY HAVE A STORE FALLBACK?
+  Robustness. The file MUST be transferred even if compression fails.
+  Stalling a file transfer is worse than sending uncompressed data.
+
+
+================================================================================
+ALGORITHM COMPARISON SUMMARY
+================================================================================
+
+  ┌──────────────────┬──────────────┬──────────┬────────────────────────────┐
+  │ Algorithm        │ Level        │ Use Case │ Why Chosen                 │
+  ├──────────────────┼──────────────┼──────────┼────────────────────────────┤
+  │ Deflate          │ 9 (Ultra)    │ Text     │ Max ratio on repetitive    │
+  │                  │              │ JSON     │ text data with LZ77+Huffman│
+  │                  │              │ Code     │                            │
+  ├──────────────────┼──────────────┼──────────┼────────────────────────────┤
+  │ Gzip             │ 6 (Standard) │ Images   │ Universal format, balanced │
+  │                  │              │ Videos   │ speed/ratio for mixed or   │
+  │                  │              │ Binaries │ already-compressed content │
+  ├──────────────────┼──────────────┼──────────┼────────────────────────────┤
+  │ Store (No-Op)    │ N/A          │ ZIP      │ Fallback if compression    │
+  │                  │              │ Errors   │ fails; .zip exempt         │
+  └──────────────────┴──────────────┴──────────┴────────────────────────────┘
+
+
+================================================================================
+END-TO-END FLOW (PUTTING IT ALL TOGETHER)
+================================================================================
+
+When a user picks a file in SmartStream and clicks Send:
+
+  1. processFile(file) is called.
+  2. The file ArrayBuffer is read.
+  3. The first 512 KB is sampled:
+     → Entropy is computed (how random is the data?).
+     → The magic number bytes identify the file family.
+  4. Security checks 1–6 run in order.
+     → If any check trips, securityStatus becomes 'Suspicious' and riskScore is set.
+     → Compression still runs (the UI shows the warning, but the file is processed).
+  5. The decision tree picks Deflate or Gzip (or Store for .zip/errors).
+  6. The compressed Blob is returned together with a FileMeta object containing:
+     - algorithm used
+     - original and compressed sizes
+     - entropy value
+     - security status and risk score
+     - reason string
+     - detected MIME/family
+  7. The rest of the pipeline (encryption → chunking → WebRTC mesh) takes over.
+
+
+================================================================================
+WHY TWO ALGORITHMS AND NOT MORE?
+================================================================================
+
+You might ask: "Why not use LZMA, ZSTD, or Brotli?"
+
+  ✓ Browser Support: Deflate and Gzip are natively supported by browsers via
+    the fflate library (pure JS, no WebAssembly required). LZMA/ZSTD require
+    heavier dependencies.
+
+  ✓ Speed in Browser: fflate is one of the fastest pure-JS implementations.
+    Running LZMA (much slower algorithm) in-browser would freeze the UI for
+    large files.
+
+  ✓ Simplicity: Two algorithms cover 100% of cases cleanly.
+    TEXT → Deflate. EVERYTHING ELSE → Gzip. No ambiguity.
+
+  ✓ Compatibility: The receiver (another browser peer) can easily decompress
+    standard Deflate/Gzip. Exotic formats like ZSTD or LZMA need matching libs.
+
+  ✓ Diminishing Returns: LZMA or ZSTD might save 5–15% extra on text vs Deflate,
+    but at 10–100x the CPU cost in a browser. Not worth it.
+
+
+================================================================================
+SUMMARY IN ONE SENTENCE
+================================================================================
+
+SmartStream's compression pipeline reads a file, measures its entropy, identifies
+its type from raw magic-number bytes, runs 6 security checks to detect malware,
+then feeds the result through a 2-branch decision tree that picks Deflate level-9
+for text/code (maximum ratio) or Gzip level-6 for everything else (universal
+compatibility), with a raw Store passthrough as a safety fallback — producing a
+compressed Blob and a rich FileMeta object that is then handed off to the
+encryption and WebRTC transfer stages.
+
+================================================================================
